@@ -5,7 +5,7 @@ import time
 from collections import Counter, defaultdict
 from pathlib import Path
 
-from Laya.laya_adapter import LayaTriageAdapter, DEFAULT_TRIAGE_QUESTIONS  # chỉnh import nếu cần
+from src.Laya.laya_adapter import LayaTriageAdapter, DEFAULT_TRIAGE_QUESTIONS  # chỉnh import nếu cần
 
 # --- 18 cases (6 EN / 6 VI / 6 JA). Label = expected task_type ---
 # risk label chỉ dùng để quan sát, chưa tính accuracy chính

@@ -12,7 +12,7 @@
       "correct": true,
       "confidence": 0.597,
       "abstain": false,
-      "latency_ms": 11096.1,
+      "latency_ms": 32653.7,
       "model": "multilingual"
     },
     {
@@ -25,7 +25,7 @@
       "correct": true,
       "confidence": 0.52,
       "abstain": true,
-      "latency_ms": 355.1,
+      "latency_ms": 298.4,
       "model": "multilingual"
     },
     {
@@ -38,7 +38,7 @@
       "correct": true,
       "confidence": 0.52,
       "abstain": true,
-      "latency_ms": 351.0,
+      "latency_ms": 287.2,
       "model": "multilingual"
     },
     {
@@ -51,7 +51,7 @@
       "correct": true,
       "confidence": 0.59,
       "abstain": false,
-      "latency_ms": 350.3,
+      "latency_ms": 359.1,
       "model": "multilingual"
     },
     {
@@ -64,7 +64,7 @@
       "correct": false,
       "confidence": 0.402,
       "abstain": true,
-      "latency_ms": 334.0,
+      "latency_ms": 298.7,
       "model": "multilingual"
     },
     {
@@ -77,7 +77,7 @@
       "correct": true,
       "confidence": 0.749,
       "abstain": false,
-      "latency_ms": 327.9,
+      "latency_ms": 271.2,
       "model": "multilingual"
     },
     {
@@ -90,7 +90,7 @@
       "correct": true,
       "confidence": 0.352,
       "abstain": true,
-      "latency_ms": 351.2,
+      "latency_ms": 314.2,
       "model": "multilingual"
     },
     {
@@ -103,7 +103,7 @@
       "correct": false,
       "confidence": 0.42,
       "abstain": true,
-      "latency_ms": 335.9,
+      "latency_ms": 297.6,
       "model": "multilingual"
     },
     {
@@ -116,7 +116,7 @@
       "correct": true,
       "confidence": 0.545,
       "abstain": true,
-      "latency_ms": 353.2,
+      "latency_ms": 307.8,
       "model": "multilingual"
     },
     {
@@ -129,7 +129,7 @@
       "correct": true,
       "confidence": 0.512,
       "abstain": true,
-      "latency_ms": 357.5,
+      "latency_ms": 315.5,
       "model": "multilingual"
     },
     {
@@ -142,7 +142,7 @@
       "correct": true,
       "confidence": 0.463,
       "abstain": true,
-      "latency_ms": 310.2,
+      "latency_ms": 278.4,
       "model": "multilingual"
     },
     {
@@ -155,7 +155,7 @@
       "correct": true,
       "confidence": 0.642,
       "abstain": false,
-      "latency_ms": 319.2,
+      "latency_ms": 267.4,
       "model": "multilingual"
     },
     {
@@ -168,7 +168,7 @@
       "correct": false,
       "confidence": 0.503,
       "abstain": true,
-      "latency_ms": 344.3,
+      "latency_ms": 295.2,
       "model": "multilingual"
     },
     {
@@ -181,7 +181,7 @@
       "correct": true,
       "confidence": 0.62,
       "abstain": false,
-      "latency_ms": 420.6,
+      "latency_ms": 276.2,
       "model": "multilingual"
     },
     {
@@ -194,7 +194,7 @@
       "correct": false,
       "confidence": 0.508,
       "abstain": true,
-      "latency_ms": 401.2,
+      "latency_ms": 304.8,
       "model": "multilingual"
     },
     {
@@ -207,7 +207,7 @@
       "correct": false,
       "confidence": 0.359,
       "abstain": true,
-      "latency_ms": 371.4,
+      "latency_ms": 327.7,
       "model": "multilingual"
     },
     {
@@ -220,7 +220,7 @@
       "correct": false,
       "confidence": 0.54,
       "abstain": true,
-      "latency_ms": 349.3,
+      "latency_ms": 297.3,
       "model": "multilingual"
     },
     {
@@ -233,7 +233,7 @@
       "correct": true,
       "confidence": 0.635,
       "abstain": false,
-      "latency_ms": 314.9,
+      "latency_ms": 265.4,
       "model": "multilingual"
     }
   ]
