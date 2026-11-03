@@ -1,0 +1,14 @@
+# Optional static model catalogue for the Agent System.
+# LiteLLM model identifiers. Override at runtime with LLM_MODEL_PLAN / LLM_MODEL_CODING.
+
+providers:
+  gemini:
+    plan: gemini/gemini-3.5-flash-lite
+    coding: gemini/gemini-3.5-flash-lite
+    notes: Fast / cost-efficient; verify tool calling on target version.
+
+defaults:
+  provider: gemini
+  max_results_search: 5
+  temperature_plan: 0.2
+  temperature_coding: 0.1
