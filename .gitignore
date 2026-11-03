@@ -1,4 +1,6 @@
+
 .env
+.env.local
 .env.*
 *.pyc
 __pycache__/
@@ -9,3 +11,7 @@ venv/
 *.log
 .DS_Store
 .mcp.json
+data/
+workspace/
+!workspace/.gitkeep
+*.db

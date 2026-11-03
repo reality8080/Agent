@@ -10,5 +10,5 @@ providers:
 defaults:
   provider: gemini
   max_results_search: 5
-  temperature_plan: 0.2
-  temperature_coding: 0.1
+  temperature_plan: 1
+  temperature_coding: 1
