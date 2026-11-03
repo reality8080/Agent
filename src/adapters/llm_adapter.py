@@ -95,7 +95,7 @@ class LLMAdapter:
         self,
         default_provider: ModelProvider = ModelProvider.OPENAI,
         model_overrides: Optional[Dict[str, str]] = None,
-        temperature: float = 0.2,
+        temperature: float = 1.0,
         max_tokens: int = 4096,
         mock: bool = False,
     ):
