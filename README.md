@@ -100,7 +100,7 @@ Sau khi mock tests đạt, đặt `LLM_MOCK=0`, `SEARCH_MOCK=0`, `MEMORYLAKE_MOC
 
 ```dotenv
 LLM_PROVIDER=gemini
-LLM_MODEL=gemini/gemini-2.0-flash
+LLM_MODEL=gemini/gemini-3.5-flash-lite
 LLM_MOCK=0
 TAVILY_API_KEY=...
 SEARCH_MOCK=0

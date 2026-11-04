@@ -42,7 +42,7 @@ class ModelProvider(str, Enum):
 DEFAULT_MODELS: Dict[ModelProvider, str] = {
     ModelProvider.OPENAI: "openai/gpt-4o",
     ModelProvider.ANTHROPIC: "anthropic/claude-3-5-sonnet-20241022",
-    ModelProvider.GEMINI: "gemini/gemini-2.0-flash",
+    ModelProvider.GEMINI: "gemini/gemini-3.5-flash-lite",
     ModelProvider.GROK: "xai/grok-2-latest",
     ModelProvider.MOONSHOT: "moonshot/moonshot-v1-32k",
 }
