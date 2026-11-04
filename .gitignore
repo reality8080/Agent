@@ -1,7 +1,7 @@
-
 .env
 .env.local
 .env.*
+.env.example
 *.pyc
 __pycache__/
 .venv/
@@ -14,4 +14,3 @@ venv/
 data/
 workspace/
 !workspace/.gitkeep
-*.db

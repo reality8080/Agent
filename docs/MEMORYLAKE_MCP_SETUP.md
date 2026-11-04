@@ -47,10 +47,10 @@ MEMORYLAKE_MCP_URL=https://mcp.memorylake.ai
 MEMORYLAKE_MCP_TOKEN=          # project-scoped bearer; leave empty → mock
 MEMORYLAKE_PROJECT_ID=         # e.g. proj-... or custom_id
 MEMORYLAKE_USER_ID=            # optional actor id
-MEMORYLAKE_MOCK=1              # force mock; auto-mock when token missing
+MEMORYLAKE_MOCK=1              # explicitly force mock; missing token alone does NOT auto-mock
 ```
 
-Adapter also respects the same variables when constructed without explicit args.
+Adapter also respects the same variables when constructed without explicit args. A missing token does not silently switch to mock; use `MEMORYLAKE_MOCK=1` for offline runs, otherwise the live connection must be configured and verified.
 
 ## 4. Adapter location & usage
 

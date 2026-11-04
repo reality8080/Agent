@@ -51,8 +51,7 @@ cp .env.example .env
 | `GOOGLE_API_KEY` / `GEMINI_API_KEY` | Gemini |
 | `XAI_API_KEY` | Grok (xAI) |
 | `MOONSHOT_API_KEY` / `KIMI_API_KEY` | Moonshot / Kimi |
-| `LLM_MODEL_PLAN` | Optional LiteLLM model id for Plan mode |
-| `LLM_MODEL_CODING` | Optional LiteLLM model id for Coding mode |
+| `LLM_MODEL` | One LiteLLM model id reused for Plan, Coding and Reviewer permission modes |
 | `TAVILY_API_KEY` | Tavily Search |
 | `SEARCH_MAX_RESULTS` | Default 5 (Planner-friendly) |
 

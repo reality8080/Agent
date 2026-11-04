@@ -1,12 +1,14 @@
-# Adapter dependencies (install into project .venv)
 litellm>=1.40.0
 langchain-tavily>=0.1.0
 langchain-core>=0.2.0
 python-dotenv>=1.0.0
 pydantic>=2.0.0
-mcp>=1.0.0 if switching to official MCP Python SDK client.
 langgraph>=0.2.0
+langgraph-checkpoint-sqlite>=2.0.0
 aiosqlite>=0.20.0
+pytest>=8.0.0
 
-# laya  # pip install laya  (requires torch CPU)
+# Optional only when explicitly integrating another MCP client implementation:
 # mcp>=1.0.0
+# Laya is optional for shadow inference and may require a compatible CPU torch build:
+# pip install laya

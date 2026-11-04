@@ -1,5 +1,5 @@
 # Optional static model catalogue for the Agent System.
-# LiteLLM model identifiers. Override at runtime with LLM_MODEL_PLAN / LLM_MODEL_CODING.
+# Informational catalogue only. The integration pins one physical model via LLM_MODEL.
 
 providers:
   gemini:
