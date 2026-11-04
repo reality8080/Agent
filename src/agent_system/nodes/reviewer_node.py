@@ -1,97 +1,137 @@
-"""Reviewer node — read-only assessment before Gate 2."""
-
+"""Read-only Reviewer; deterministic evidence dominates model score."""
 from __future__ import annotations
 
+import json
 import logging
-import os
-import sys
+import re
 from pathlib import Path
-from typing import Any, Dict
+from typing import Any, Dict, List
+
+from agent_system.runtime import main_llm_runtime
+from agent_system.security.approval import compute_scope_hash
 
 logger = logging.getLogger(__name__)
 
-_SRC = Path(__file__).resolve().parents[2]
-if str(_SRC) not in sys.path:
-    sys.path.insert(0, str(_SRC))
-
 
 def reviewer_node(state: Dict[str, Any]) -> Dict[str, Any]:
-    from adapters.llm_adapter import LLMAdapter, LLMMode
+    from adapters.llm_adapter import LLMMode
 
-    plan = state.get("plan", "")
-    files = state.get("files_changed") or []
-    tests_passed = state.get("tests_passed", False)
-    test_output = state.get("test_output", "")
-    user_request = state.get("user_request", "")
+    findings: List[Dict[str, Any]] = []
+    if state.get("scope_violations"):
+        findings.append({"severity": "critical", "kind": "scope", "paths": state["scope_violations"],
+                         "evidence": "actual changed paths exceed approved scope"})
+    if state.get("status") == "failed":
+        findings.append({"severity": "high", "kind": "execution",
+                         "evidence": state.get("error") or "coder/workflow status is failed"})
+    try:
+        current_scope_hash = compute_scope_hash(state.get("scope_paths") or [], state.get("workspace_root", ""))
+        if current_scope_hash != state.get("scope_hash"):
+            findings.append({"severity": "critical", "kind": "approval_binding",
+                             "evidence": "approved plan/scope/workspace binding no longer matches"})
+    except Exception as exc:
+        findings.append({"severity": "critical", "kind": "approval_binding",
+                         "evidence": f"scope verification failed: {type(exc).__name__}"})
+    instruction_files = state.get("instruction_files_used") or []
+    instruction_text = state.get("instruction_content") or ""
+    if not any(Path(str(item)).name.lower() == "agents.md" for item in instruction_files):
+        findings.append({"severity": "high", "kind": "instruction_compliance",
+                         "evidence": "common AGENTS.md was not loaded by Coding preparation"})
+    required_order = ("YAGNI", "REUSE", "BUILT-IN", "EXISTING DEPENDENCY", "MINIMAL CODE", "PROTECT")
+    positions = [instruction_text.find(term) for term in required_order]
+    if not instruction_text or any(pos < 0 for pos in positions) or positions != sorted(positions):
+        findings.append({"severity": "high", "kind": "instruction_compliance",
+                         "evidence": "Ponytail order missing or not followed in loaded instructions"})
+    tests = state.get("test_results") or {}
+    if tests.get("status") == "failed":
+        findings.append({"severity": "high", "kind": "tests", "evidence": state.get("test_output", "")[:1500]})
+    elif tests.get("status") != "passed":
+        findings.append({"severity": "medium", "kind": "tests_not_verified",
+                         "evidence": f"test status={tests.get('status', 'not_run')}"})
 
     system = (
-        "You are the Reviewer for Agent System v0.5. "
-        "Assess whether the code changes satisfy the plan and user request. "
-        "Reply with:\n"
-        "SCORE: <0.0-1.0>\n"
-        "SUMMARY: <2-4 sentences>\n"
-        "ISSUES: <bullet list or none>\n"
+        "You are a read-only code reviewer. Do not edit files, execute tools or grant permissions. "
+        "Inspect the approved plan, actual diff, changed paths, test evidence, security boundaries, "
+        "pre-existing user changes and Ponytail instruction files. Return ONLY one valid JSON object "
+        'with keys: verdict (PASS|FAIL|NOT_VERIFIED), summary (non-empty string), findings (array; '
+        'each item has severity critical|high|medium|low, file, line and reason), score (optional 0..1). '
+        "Do not return PASS if evidence is incomplete or a high/critical finding exists. Score is "
+        "informational only and never approves Gate 1 or Gate 2."
     )
-
-    from adapters.llm_adapter import ModelProvider
-    prov_name = os.getenv("LLM_PROVIDER", "gemini").lower()
-    try:
-        prov = ModelProvider(prov_name)
-    except ValueError:
-        prov = ModelProvider.GEMINI
-    adapter = LLMAdapter(
-        default_provider=prov,
-        mock=os.getenv("LLM_MOCK", "1").lower() in ("1", "true", "yes"),
+    user = (
+        f"Approved plan:\n{state.get('plan', '')[:5000]}\n\n"
+        f"Actual Git diff:\n{state.get('git_diff', '')[:12000]}\n\n"
+        f"Changed files:\n{state.get('files_changed', [])}\n"
+        f"Pre-existing dirty files protected:\n{state.get('git_preexisting_files', [])}\n"
+        f"Test evidence:\n{state.get('test_results', {})}\n{state.get('test_output', '')[:4000]}\n\n"
+        f"Instruction files used:\n{state.get('instruction_files_used', [])}\n"
+        f"Instructions:\n{state.get('instruction_content', '')[:8000]}\n"
+        f"Deterministic findings already detected:\n{findings}"
     )
-
+    model_review_live = False
     try:
-        resp = adapter.complete(
-            messages=[
-                {"role": "system", "content": system},
-                {
-                    "role": "user",
-                    "content": (
-                        f"Request: {user_request}\n\nPlan:\n{plan[:1500]}\n\n"
-                        f"Files changed: {files}\nTests passed: {tests_passed}\n"
-                        f"Test output:\n{test_output[:1000]}"
-                    ),
-                },
-            ],
-            mode=LLMMode.PLAN,
+        adapter, model = main_llm_runtime()
+        response = adapter.complete(
+            messages=[{"role": "system", "content": system}, {"role": "user", "content": user}],
+            mode=LLMMode.PLAN, model=state.get("main_model") or model,
         )
-        text = resp.content or ""
+        review_text = response.content or "No model review text returned."
+        model_review_live = bool(response.content) and not bool(getattr(adapter, "mock", False))
     except Exception as exc:
-        logger.warning("Reviewer LLM failed: %s", exc)
-        text = (
-            f"SCORE: {'0.85' if tests_passed else '0.4'}\n"
-            "SUMMARY: Fallback review based on test results only.\n"
-            "ISSUES: none\n"
-        )
+        logger.warning("Reviewer LLM unavailable: %s", type(exc).__name__)
+        review_text = f"AI review not_run ({type(exc).__name__}); deterministic checks only."
+    structured_review = None
+    structured_valid = False
+    if model_review_live:
+        try:
+            candidate_text = review_text.strip()
+            if candidate_text.startswith("```"):
+                candidate_text = re.sub(r"^```(?:json)?\s*|\s*```$", "", candidate_text, flags=re.I)
+            parsed = json.loads(candidate_text)
+            if (isinstance(parsed, dict)
+                    and parsed.get("verdict") in {"PASS", "FAIL", "NOT_VERIFIED"}
+                    and isinstance(parsed.get("summary"), str) and parsed["summary"].strip()
+                    and isinstance(parsed.get("findings"), list)):
+                structured_review = parsed
+                structured_valid = True
+                for item in parsed["findings"]:
+                    if not isinstance(item, dict) or item.get("severity") not in {"critical", "high", "medium", "low"}:
+                        structured_valid = False
+                        break
+                    findings.append({"severity": item["severity"], "kind": "llm_review",
+                                     "file": str(item.get("file") or ""),
+                                     "line": item.get("line"),
+                                     "evidence": str(item.get("reason") or "")[:1000]})
+        except (json.JSONDecodeError, TypeError, ValueError):
+            structured_valid = False
+    if not model_review_live or not structured_valid:
+        findings.append({"severity": "medium", "kind": "reviewer_not_verified",
+                         "evidence": "review was mock/unavailable or did not satisfy the structured JSON contract"})
 
-    score = 0.5
-    for line in text.splitlines():
-        if line.strip().upper().startswith("SCORE:"):
-            try:
-                score = float(line.split(":", 1)[1].strip().split()[0])
-            except Exception:
-                pass
-            break
+    score = 0.0
+    if structured_valid and isinstance(structured_review.get("score"), (int, float)):
+        score = max(0.0, min(1.0, float(structured_review["score"])))
     else:
-        # Mock LLM does not emit SCORE — derive from tests
-        score = 0.85 if tests_passed else 0.35
-
-    # Bound by tests
-    if not tests_passed:
-        score = min(score, 0.45)
-
-    return {
-        "review": text[:3000],
-        "review_score": score,
-        "events": [
-            {
-                "type": "review_completed",
-                "score": score,
-                "tests_passed": tests_passed,
-            }
-        ],
-    }
+        match = re.search(r"(?im)^\s*SCORE\s*:\s*(0(?:\.\d+)?|1(?:\.0+)?)", review_text)
+        if match:
+            score = max(0.0, min(1.0, float(match.group(1))))
+    # PASS requires structured live review AND independent deterministic evidence;
+    # score alone is never consulted for the decision.
+    has_blocker = any(f["severity"] in ("critical", "high") for f in findings)
+    model_verdict = (structured_review or {}).get("verdict")
+    if has_blocker or model_verdict == "FAIL":
+        review_status = "fail"
+    elif (tests.get("status") != "passed" or not model_review_live
+          or not structured_valid or model_verdict != "PASS"):
+        review_status = "not_verified"
+    elif state.get("scope_violations"):
+        review_status = "fail"
+    else:
+        review_status = "pass"
+    return {"review": review_text[:6000], "review_score": score,
+            "review_findings": findings, "review_status": review_status,
+            "review_approved": review_status == "pass",
+            "events": [{"type": "review_completed", "status": review_status,
+                        "score_informational": score, "deterministic_findings": len(findings),
+                        "model_review_live": model_review_live, "structured_review_valid": structured_valid,
+                        "model_verdict": model_verdict,
+                        "tests_status": tests.get("status", "not_run")}]} 
