@@ -1,52 +1,49 @@
-# MemoryLake OAuth 2.1 Patch — Agent System Task 06
+# Agent System v0.5 — MemoryLake live-contract correction
 
-## Files in this patch
+Build date: 2026-11-05
 
-- `src/adapters/memorylake_adapter.py` — replace custom Bearer JSON-RPC with MCP SDK v2 OAuth 2.1 + Streamable HTTP; persist OAuth tokens and client registration through OS keyring; remove false Live-ready status and tool-name fallback; discover actual schemas; fail closed if an add-memory schema cannot carry project scope.
-- `src/adapters/requirements-adapters.txt` — declare `mcp>=2.3.0,<3` and `keyring>=25.0.0`.
-- `src/agent_system/nodes/memory_node.py` — enforce VERIFIED/APPROVED/DISPUTED locally even if remote `search_memory` ignores a status filter.
-- `src/tests/test_memorylake_adapter.py` — update health expectations and add discovery, schema, secure storage and callback tests.
-- `src/tests/test_permission_and_recovery.py` — cover filtering of proposed memory from Planner context.
-- `scripts/memorylake_mcp_probe.py` — read-only OAuth + MCP initialize + tools/list probe; it does not write memory.
-- `docs/MEMORYLAKE_MCP_SETUP.md` — update OAuth setup instructions.
-- `README.md` — update Live configuration.
+## Purpose
 
-## Apply safely
+This is an overlay patch for the source snapshot already carrying the MemoryLake OAuth patch. It aligns the adapter with the authenticated MCP schema observed from the user's own endpoint on 2026-11-05.
 
-1. Extract this patch into a temporary folder first.
-2. Copy/merge only the listed files into the existing `D:\Agent` repository, preserving `.env`, `.mcp.json`, `.venv`, SQLite databases and all other user data.
-3. Do not replace the whole repository with this patch archive.
-4. The adapter no longer uses `MEMORYLAKE_MCP_TOKEN` as MCP authentication. The existing variable is ignored for this endpoint; keep the Personal REST API Key separate if you use REST elsewhere.
-5. Keep the existing `.mcp.json` for VS Code unchanged.
+## Changes
 
-## Runtime configuration
+- Use the live tool names `inspect` and `search`; do not call the legacy `search_memory`, `add_memory`, or `detect_conflicts` MCP tools.
+- Call `inspect` before `search` in the same MCP session and verify the configured project ID is in the returned boundary.
+- Match the observed `search` arguments: `queries`, `project_ids`, `return_types=["fact"]`, and `top_n`.
+- Require explicit project provenance on every fact used by the Agent. Facts without a project scope are discarded.
+- Preserve missing status as `None`; only `VERIFIED`, `APPROVED`, and `DISPUTED` are eligible for Planner context. Unknown, proposed, and deprecated facts are not passed as verified context.
+- Treat conflict detection as unavailable because the observed server toolset does not expose it.
+- Block live `remember` and `forget`. Deliver records a local pending proposal as a `memory_proposal` Event Ledger event. There is no remote write during this patch.
+- Separate OAuth authentication, MCP discovery, inspect, and read health states; discovery alone no longer reports retrieval readiness.
+- Add a read-only `scripts/memorylake_read_probe.py` diagnostic that does not print fact content and never calls `remember` or `forget`.
+- Extend contract, project-boundary, result-parsing, unknown-status, and local-proposal tests.
 
-Keep the endpoint shown in the user's MemoryLake MCP page:
+## Files included
 
-`https://app.memorylake.ai/memorylake/mcp/v2`
+- `README.md`
+- `docs/MEMORYLAKE_MCP_SETUP.md`
+- `scripts/memorylake_read_probe.py` (new)
+- `src/adapters/memorylake_adapter.py`
+- `src/agent_system/nodes/deliver_node.py`
+- `src/agent_system/nodes/memory_node.py`
+- `src/agent_system/state.py`
+- `src/tests/test_memorylake_adapter.py`
+- `src/tests/test_permission_and_recovery.py`
+- `apply_memorylake_fix.ps1`
+- `manifest.json`
 
-Required for the probe:
+## Safety
 
-- `MEMORYLAKE_MCP_URL` — the endpoint above
-- `MEMORYLAKE_MOCK=0`
-- `MEMORYLAKE_PROJECT_ID` — Agent's internal project scope (does not automatically equal the OAuth-selected MemoryLake Workspace ID)
-- `MEMORYLAKE_OAUTH_CALLBACK_PORT=8765` (optional; use a stable free localhost port)
+- `.env`, OAuth credentials, API keys, SQLite databases, checkpoints, and user data are not included.
+- The apply script verifies every target file against the expected pre-patch SHA-256 before writing anything. If a target file differs, it aborts before modifying any file.
+- Existing target files are backed up under `.backup_memorylake_contract_fix_<timestamp>` before overlay.
+- No remote MemoryLake write/delete is performed by the patch or probe.
 
-OAuth tokens and client registration information are stored through Windows Credential Manager. No token cache file is created in the repository.
+## Verification performed in the assistant's isolated working copy
 
-## Tests run in the patch-preparation environment
+- `python -m compileall -q src run_agent.py scripts` — PASS.
+- `python -m pytest -q -rs` — **70 passed, 1 skipped in 0.30s**.
+- The skipped test requires LangGraph, which is not installed in this isolated Python 3.13.5 environment. The user's Windows Python 3.11.9 environment must run the full suite after applying the overlay.
 
-- `python -m compileall -q src run_agent.py scripts` — exit 0
-- `python -m pytest src/tests -q -rs` — 55 passed, 1 skipped
-- `python -m pytest src/tests/test_memorylake_adapter.py -q` — 17 passed
-- The single skip is the LangGraph pause/resume test because LangGraph is not installed in the patch-preparation container. The user's Windows environment previously showed LangGraph installed, so rerun the full suite there.
-- A local loopback callback smoke test passed; it exercised callback parsing and state/issuer passthrough with a test authorization result, not a live MemoryLake OAuth flow.
-
-## Not yet verified
-
-- Live MemoryLake OAuth authorization from the user's Windows process
-- Live MCP initialize/tools/list and server-provided tool schemas
-- Live search_memory/add_memory/detect_conflicts payload compatibility
-- Live project isolation and proposal retrieval
-
-The probe is read-only. Do not test writes until the real `add_memory` schema is discovered and confirmed to support project metadata/scope. Use a dedicated QA memory boundary for any later write test.
+These results do not mean the patch has been applied to `D:\Agent`, and do not establish live MemoryLake search success. The user must apply the patch and run the read-only probe on the Windows host.

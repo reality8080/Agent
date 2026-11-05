@@ -137,10 +137,11 @@ def test_project_scope_required():
         assert "project_id" in str(e)
 
 
-def test_detect_conflicts_mock():
+def test_conflict_detection_is_not_claimed_when_tool_is_unavailable():
     adapter = MemoryLakeAdapter(mock=True, project_id="proj-demo")
     report = adapter.detect_conflicts(query="ledger")
     assert report.mock is True
+    assert report.available is False
     assert report.conflicts == []
 
 
@@ -157,12 +158,11 @@ def test_list_resources_mock():
     assert resources[0]["uri"].startswith("memorylake://mock/")
 
 
-def test_discover_tools_mock():
+def test_discover_tools_mock_matches_live_tool_contract():
     adapter = MemoryLakeAdapter(mock=True)
     tools = adapter.discover_tools()
-    assert "search_memory" in tools
-    assert "add_memory" in tools
-    assert "detect_conflicts" in tools
+    assert {"inspect", "search", "remember", "forget"}.issubset(tools)
+    assert not {"search_memory", "add_memory", "detect_conflicts"}.intersection(tools)
 
 
 def test_factory():
@@ -197,46 +197,87 @@ def test_live_discovery_failure_does_not_fallback_to_documented_names(monkeypatc
     assert adapter.health()["live_ready"] is False
 
 
-def test_live_discovery_uses_only_server_returned_tools(monkeypatch):
+def test_live_discovery_does_not_claim_retrieval_ready(monkeypatch):
     adapter = MemoryLakeAdapter(mock=False)
-    actual = (["search_memory"], {"search_memory": {"properties": {"query": {"type": "string"}}}})
+    actual = (["inspect", "search"], {
+        "inspect": {"properties": {}},
+        "search": {"properties": {"queries": {"type": "array"}}, "required": ["queries"]},
+    })
     def succeed(_operation):
-        adapter._live_verified = True
         adapter._oauth_authenticated = True
         return actual
 
     monkeypatch.setattr(adapter, "_run_live", succeed)
-    assert adapter.discover_tools() == ["search_memory"]
-    assert adapter.discovered_tool_schemas["search_memory"]["properties"].keys() == {"query"}
-    assert adapter.health()["live_ready"] is True
+    assert adapter.discover_tools() == ["inspect", "search"]
+    assert adapter.discovered_tool_schemas["search"]["properties"].keys() == {"queries"}
+    health = adapter.health()
+    assert health["mcp_discovery_verified"] is True
+    assert health["live_ready"] is False
+    assert health["ready_for_retrieval"] is False
 
 
-def test_tool_arguments_are_filtered_to_discovered_schema():
+def test_tool_arguments_are_filtered_to_actual_search_schema():
     adapter = MemoryLakeAdapter(mock=False)
     result = adapter._filter_tool_arguments(
-        "search_memory",
-        {"query": "hello", "top_k": 5, "project_id": "project-a"},
-        {"properties": {"query": {}, "project_id": {}}},
+        "search",
+        {"queries": ["hello"], "project_ids": ["proj-a"], "return_types": ["fact"],
+         "top_n": 5, "unsupported_status": "approved"},
+        {"properties": {"queries": {}, "project_ids": {}, "return_types": {}, "top_n": {}}},
     )
-    assert result == {"query": "hello", "project_id": "project-a"}
+    assert result == {"queries": ["hello"], "project_ids": ["proj-a"],
+                      "return_types": ["fact"], "top_n": 5}
 
 
 def test_tool_argument_mapping_fails_closed_on_missing_required_field():
     adapter = MemoryLakeAdapter(mock=False)
     with pytest.raises(RuntimeError, match="not mapped"):
         adapter._filter_tool_arguments(
-            "search_memory", {"query": "hello"},
-            {"properties": {"query": {}, "workspace_id": {}}, "required": ["workspace_id"]},
+            "search", {"queries": ["hello"]},
+            {"properties": {"queries": {}, "project_ids": {}}, "required": ["project_ids"]},
         )
 
 
-def test_live_add_memory_refuses_schema_without_project_scope():
+@pytest.mark.parametrize("tool_name", ["remember", "forget"])
+def test_live_memory_writes_and_deletes_are_blocked(tool_name):
     adapter = MemoryLakeAdapter(mock=False)
-    with pytest.raises(RuntimeError, match="refusing an unscoped write"):
-        adapter._filter_tool_arguments(
-            "add_memory", {"content": "test", "project_id": "project-a"},
-            {"properties": {"content": {}}},
-        )
+    with pytest.raises(PermissionError, match="blocks remote writes/deletes"):
+        adapter._filter_tool_arguments(tool_name, {"facts": ["test"]}, {"properties": {}})
+
+
+def test_live_propose_memory_never_calls_remote_remember():
+    adapter = MemoryLakeAdapter(mock=False, project_id="proj-a")
+    with pytest.raises(PermissionError, match="direct durable write"):
+        adapter.propose_memory("test fact", project_id="proj-a")
+
+
+def test_tool_argument_mapping_fails_closed_when_empty_schema_drops_arguments():
+    adapter = MemoryLakeAdapter(mock=False)
+    with pytest.raises(RuntimeError, match="no input properties"):
+        adapter._filter_tool_arguments("search", {"queries": ["hello"]}, {"properties": {}})
+
+
+def test_extract_project_ids_ignores_project_mentions_inside_fact_metadata():
+    result = {
+        "result": {
+            "projects": [{"id": "proj-allowed", "name": "Allowed"}],
+            "facts": {"items": [{"metadata": {"project_id": "proj-not-a-boundary"}}]},
+            "data": {"workspace": {"boundary_projects": [{"project_id": "proj-nested-allowed"}]}},
+        }
+    }
+    assert MemoryLakeAdapter._extract_project_ids(result) == {"proj-allowed", "proj-nested-allowed"}
+
+
+def test_parser_keeps_nested_fact_as_provenance_source():
+    adapter = MemoryLakeAdapter(mock=False)
+    result = {"facts": [{"score": 0.91, "fact": {
+        "fact_id": "fact-1", "content": "scoped content",
+        "scope": "project:proj-a", "status": "verified",
+    }}]}
+    hits = adapter._parse_search_result(result, project_id="proj-a")
+    assert len(hits) == 1
+    assert hits[0].memory.raw["fact"]["scope"] == "project:proj-a"
+    assert hits[0].memory.scope.project_id == "proj-a"
+    assert hits[0].memory.status == MemoryStatus.VERIFIED
 
 
 if __name__ == "__main__":
@@ -353,3 +394,171 @@ def test_oauth_loopback_callback_preserves_code_state_and_issuer(monkeypatch):
             await callback.close()
 
     asyncio.run(exercise())
+
+
+def test_inspect_result_envelope_and_project_ids_are_unwrapped():
+    result = {"result": {"projects": [{"id": "proj-a"}, {"project_id": "proj-b"}]}}
+    assert MemoryLakeAdapter._unwrap_result_envelope(result) == result["result"]
+    assert MemoryLakeAdapter._extract_project_ids(result) == {"proj-a", "proj-b"}
+
+
+def test_live_search_parser_requires_explicit_project_scope_and_preserves_unknown_status():
+    adapter = MemoryLakeAdapter(mock=False, project_id="proj-a")
+    raw = {"result": {"facts": [
+        {"id": "fact-1", "content": "known", "scope": "project:proj-a"},
+        {"id": "fact-2", "content": "unscoped"},
+        {"id": "fact-3", "content": "wrong", "scope": "project:proj-b"},
+    ]}}
+    hits = adapter._parse_search_result(raw, project_id="proj-a")
+    assert [hit.memory.memory_id for hit in hits] == ["fact-1"]
+    assert hits[0].memory.status is None
+    assert hits[0].memory.scope.project_id == "proj-a"
+
+
+def test_search_payload_matches_actual_server_contract():
+    assert MemoryLakeAdapter._search_payload("valve pipeline", "proj-a", 500) == {
+        "queries": ["valve pipeline"], "project_ids": ["proj-a"],
+        "return_types": ["fact"], "top_n": 100,
+    }
+
+
+def test_remember_and_forget_are_blocked_even_without_schema_properties():
+    adapter = MemoryLakeAdapter(mock=False)
+    for tool in ("remember", "forget"):
+        with pytest.raises(PermissionError):
+            adapter._filter_tool_arguments(tool, {"facts": ["x"]}, {})
+
+
+def test_live_search_calls_inspect_before_search_and_uses_project_boundary():
+    from types import SimpleNamespace
+    adapter = MemoryLakeAdapter(mock=False, project_id="proj-a")
+    adapter._discovered_tools = ["inspect", "search"]
+    schemas = {
+        "inspect": {"properties": {}},
+        "search": {"properties": {"queries": {}, "project_ids": {}, "return_types": {}, "top_n": {}},
+                   "required": ["queries"]},
+    }
+    calls = []
+
+    class Client:
+        async def call_tool(self, name, args):
+            calls.append((name, args))
+            if name == "inspect":
+                return SimpleNamespace(is_error=False, structured_content={"result": {"projects": [{"id": "proj-a"}]}})
+            return SimpleNamespace(is_error=False, structured_content={"facts": [
+                {"id": "fact-a", "content": "scoped fact", "scope": "project:proj-a"}
+            ]})
+
+    async def fake_list_tools(_client):
+        return ["inspect", "search"], schemas
+
+    adapter._list_tools_async = fake_list_tools
+    result = asyncio.run(adapter._search_live_async(Client(), "query", "proj-a", 4))
+    assert [name for name, _ in calls] == ["inspect", "search"]
+    assert calls[1][1] == {"queries": ["query"], "project_ids": ["proj-a"],
+                            "return_types": ["fact"], "top_n": 4}
+    assert result["facts"][0]["id"] == "fact-a"
+
+
+def test_live_search_refuses_project_outside_inspect_boundary():
+    from types import SimpleNamespace
+    adapter = MemoryLakeAdapter(mock=False)
+    adapter._discovered_tools = ["inspect", "search"]
+    schemas = {"inspect": {"properties": {}}, "search": {"properties": {"queries": {}}}}
+
+    class Client:
+        async def call_tool(self, name, args):
+            return SimpleNamespace(is_error=False, structured_content={"projects": [{"id": "proj-other"}]})
+
+    async def fake_list_tools(_client):
+        return ["inspect", "search"], schemas
+
+    adapter._list_tools_async = fake_list_tools
+    with pytest.raises(PermissionError, match="not present in MemoryLake inspect boundary"):
+        asyncio.run(adapter._search_live_async(Client(), "query", "proj-a", 4))
+
+
+def test_parser_accepts_explicit_scope_from_result_wrapper():
+    adapter = MemoryLakeAdapter(mock=False)
+    result = {"facts": [{"project_id": "proj-a", "fact": {
+        "fact_id": "fact-2", "content": "wrapper scoped content"}}]}
+    hits = adapter._parse_search_result(result, project_id="proj-a")
+    assert len(hits) == 1
+    assert hits[0].memory.scope.project_id == "proj-a"
+
+
+def test_parser_uses_metadata_on_outer_fact_wrapper():
+    adapter = MemoryLakeAdapter(mock=False)
+    result = {"facts": [{
+        "id": "fact-3", "metadata": {"scope": {"project_id": "proj-a"}, "status": "VERIFIED"},
+        "fact": {"content": "wrapper metadata content"},
+    }]}
+    hits = adapter._parse_search_result(result, project_id="proj-a")
+    assert len(hits) == 1
+    assert hits[0].memory.status == MemoryStatus.VERIFIED
+    assert hits[0].memory.content == "wrapper metadata content"
+
+
+def test_live_search_calls_inspect_first_and_uses_observed_schema():
+    from types import SimpleNamespace
+
+    adapter = MemoryLakeAdapter(mock=False, project_id="proj-a")
+    calls = []
+
+    class FakeClient:
+        async def list_tools(self, cursor=None):
+            return SimpleNamespace(tools=[
+                SimpleNamespace(name="inspect", input_schema={"properties": {}, "required": []}),
+                SimpleNamespace(name="search", input_schema={
+                    "properties": {
+                        "queries": {}, "project_ids": {}, "return_types": {}, "top_n": {},
+                    },
+                    "required": ["queries"],
+                }),
+                SimpleNamespace(name="remember", input_schema={
+                    "properties": {"facts": {}, "scope": {}}, "required": ["facts"],
+                }),
+                SimpleNamespace(name="forget", input_schema={
+                    "properties": {"fact_ids": {}, "scope": {}}, "required": ["fact_ids"],
+                }),
+            ], next_cursor=None)
+
+        async def call_tool(self, name, arguments):
+            calls.append((name, arguments))
+            payload = ({"result": {"projects": [{"id": "proj-a"}]}}
+                       if name == "inspect" else {"result": {"facts": []}})
+            return SimpleNamespace(is_error=False, structured_content=payload, content=[])
+
+    result = asyncio.run(adapter._search_live_async(FakeClient(), "agent task", "proj-a", 7))
+    assert result == {"result": {"facts": []}}
+    assert [name for name, _ in calls] == ["inspect", "search"]
+    assert calls[1][1] == {
+        "queries": ["agent task"], "project_ids": ["proj-a"],
+        "return_types": ["fact"], "top_n": 7,
+    }
+    assert adapter.health()["mcp_discovery_verified"] is True
+
+
+def test_live_search_stops_before_search_if_project_is_outside_inspect_boundary():
+    from types import SimpleNamespace
+
+    adapter = MemoryLakeAdapter(mock=False, project_id="proj-outside")
+    calls = []
+
+    class FakeClient:
+        async def list_tools(self, cursor=None):
+            return SimpleNamespace(tools=[
+                SimpleNamespace(name="inspect", input_schema={"properties": {}, "required": []}),
+                SimpleNamespace(name="search", input_schema={
+                    "properties": {"queries": {}}, "required": ["queries"],
+                }),
+            ], next_cursor=None)
+
+        async def call_tool(self, name, arguments):
+            calls.append(name)
+            return SimpleNamespace(is_error=False,
+                structured_content={"projects": [{"id": "proj-allowed"}]}, content=[])
+
+    with pytest.raises(PermissionError, match="not present in MemoryLake inspect boundary"):
+        asyncio.run(adapter._search_live_async(FakeClient(), "query", "proj-outside", 5))
+    assert calls == ["inspect"]

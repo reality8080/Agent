@@ -1,4 +1,4 @@
-"""Receive and Deliver nodes; memory is proposed only after delivery."""
+"""Receive and Deliver nodes; MemoryLake writes are never implicit."""
 from __future__ import annotations
 
 import hashlib
@@ -33,36 +33,41 @@ def receive_node(state: Dict[str, Any]) -> Dict[str, Any]:
 
 
 def _memory_proposal(state: Dict[str, Any]) -> Dict[str, Any]:
+    """Create a local pending proposal; never call MemoryLake's direct-write tool."""
     project_id = os.getenv("MEMORYLAKE_PROJECT_ID")
     if not project_id:
-        return {"status": "skipped_no_project_scope"}
-    try:
-        from adapters.memorylake_adapter import MemoryStatus, MemoryType
-        from agent_system.runtime import get_memorylake_adapter
-        adapter = get_memorylake_adapter()
-        content = (
-            f"Task outcome: {state.get('status')}\n"
-            f"Plan version: {state.get('plan_version')}\n"
-            f"Changed paths: {state.get('files_changed', [])}\n"
-            f"Test status: {(state.get('test_results') or {}).get('status', 'not_run')}\n"
-            f"Review status: {state.get('review_status', 'not_verified')}\n"
-            f"Instruction files: {state.get('instruction_files_used', [])}"
-        )
-        conflicts = adapter.detect_conflicts(query=content, project_id=project_id)
-        status = MemoryStatus.DISPUTED if conflicts.conflicts else MemoryStatus.PROPOSED
-        diff_hash = hashlib.sha256((state.get("git_diff") or "").encode("utf-8")).hexdigest()
-        evidence = [state.get("run_id", ""), diff_hash]
-        memory = adapter.propose_memory(
-            content=content, memory_type=MemoryType.REFLECTION, project_id=project_id,
-            task_id=state.get("task_id"), source_ref=f"agent-run:{state.get('run_id')}",
-            evidence_ref=[x for x in evidence if x], created_by="agent:orchestrator",
-            confidence=0.5 if state.get("coding_mock") else 0.7, status=status,
-        )
-        return {"status": memory.status.value, "memory_id": memory.memory_id,
-                "project_id": project_id, "source_ref": memory.source_ref,
-                "conflicts": conflicts.conflicts, "mock": adapter.mock}
-    except Exception as exc:
-        return {"status": "failed", "error_type": type(exc).__name__}
+        return {"status": "skipped_no_project_scope", "remote_write": False}
+
+    content = (
+        f"Task outcome: {state.get('status')}\n"
+        f"Plan version: {state.get('plan_version')}\n"
+        f"Changed paths: {state.get('files_changed', [])}\n"
+        f"Test status: {(state.get('test_results') or {}).get('status', 'not_run')}\n"
+        f"Review status: {state.get('review_status', 'not_verified')}\n"
+        f"Instruction files: {state.get('instruction_files_used', [])}"
+    )
+    diff_hash = hashlib.sha256((state.get("git_diff") or "").encode("utf-8")).hexdigest()
+    run_id = str(state.get("run_id") or "")
+    task_id = str(state.get("task_id") or "")
+    proposal_digest = hashlib.sha256(
+        f"{project_id}\n{run_id}\n{task_id}\n{content}\n{diff_hash}".encode("utf-8")
+    ).hexdigest()[:24]
+    return {
+        "status": "pending_local_approval",
+        "proposal_id": f"local-proposal-{proposal_digest}",
+        "project_id": project_id,
+        "content": content,
+        "source_ref": f"agent-run:{run_id}" if run_id else None,
+        "evidence_ref": [value for value in (task_id, run_id, diff_hash) if value],
+        "storage": "sqlite_event_ledger",
+        "approval_required": True,
+        "remote_write": False,
+        "remote_conflict_check": state.get("memory_conflicts_status", "not_checked"),
+        "reason": (
+            "MemoryLake's discovered 'remember' tool writes durable facts immediately; "
+            "this run only records a local proposal and does not write to MemoryLake."
+        ),
+    }
 
 
 def deliver_node(state: Dict[str, Any]) -> Dict[str, Any]:
@@ -93,16 +98,24 @@ def deliver_node(state: Dict[str, Any]) -> Dict[str, Any]:
         f"- laya_shadow: {state.get('laya_task_type')} / confidence={state.get('laya_confidence')}\n"
         f"- search_status: {state.get('search_status')} (mock={state.get('search_mock')})\n"
         f"- memory_retrieval_status: {state.get('memory_status')}\n"
+        f"- memory_hits_received: {state.get('memory_hits_received', 0)}\n"
+        f"- memory_hits_eligible: {state.get('memory_hits_eligible', 0)}\n"
+        f"- memory_rejected_unknown_status: {state.get('memory_rejected_unknown_status', 0)}\n"
+        f"- memory_conflicts_status: {state.get('memory_conflicts_status', 'not_checked')}\n"
         f"- instruction_files_used: {state.get('instruction_files_used', [])}\n"
         f"- git_available: {state.get('git_available')}\n"
         f"- scope_violations: {state.get('scope_violations', [])}\n"
         "\nTest status `not_run` is not PASS. Mock outputs are not live verification.\n"
         "Gate 2 authorization does not execute privileged actions in this MVP.\n"
     )
-    out = {"status": status, "deliverable": summary,
-           "events": [{"type": "delivered", "status": status, "files": files,
-                       "test_status": tests.get("status", "not_run"), "review_status": review_status}]}
+    out = {
+        "status": status,
+        "deliverable": summary,
+        "events": [{"type": "delivered", "status": status, "files": files,
+                    "test_status": tests.get("status", "not_run"), "review_status": review_status}],
+    }
     proposal = _memory_proposal({**state, **out})
     out["memory_proposal"] = proposal
+    # Event Ledger is the local durable proposal record. No MemoryLake write occurs.
     out["events"].append({"type": "memory_proposal", **proposal})
     return out

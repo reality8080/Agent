@@ -1,11 +1,14 @@
 """
 MemoryLake MCP Adapter for Agent System v0.5 (Phase 4 — Shared Memory).
 
-Maps Spec Shared Memory Contract onto the public MemoryLake MCP surface:
-  - resources/list, resources/read
-  - tools/call: search_memory
-  - tools/call: add_memory
-  - tools/call: detect_conflicts
+Maps the local Shared Memory contract onto the discovered MemoryLake MCP surface:
+  - inspect (must precede retrieval)
+  - search (project_ids, return_types, top_n)
+  - remember (direct durable write; disabled until explicit approval support)
+  - forget (destructive; never called automatically)
+
+The server tool names and schemas are authoritative. Local proposals stay in
+Agent System's SQLite Event Ledger; they are not silently sent to remember.
 
 Design constraints (Ponytail + Spec):
   - Reuse MCP SDK / HTTP client only; no extra agent framework.
@@ -18,9 +21,9 @@ Design constraints (Ponytail + Spec):
   - Mock only when MEMORYLAKE_MOCK=1 (or mock=True); no auto-mock on missing token.
 
 Discovery note:
-  Exact tool parameter schemas must be re-validated at first successful
-  session (list_tools). This adapter uses the documented method names
-  and a conservative JSON payload shape that matches the public docs.
+  Exact tool parameter schemas are re-read from the authenticated endpoint.
+  The observed endpoint contract uses inspect/search/remember/forget; the
+  adapter fails closed when a required field or scope cannot be verified.
 """
 
 from __future__ import annotations
@@ -81,7 +84,7 @@ class SharedMemory:
     memory_type: MemoryType
     content: str
     scope: MemoryScope
-    status: MemoryStatus = MemoryStatus.PROPOSED
+    status: Optional[MemoryStatus] = MemoryStatus.PROPOSED
     source_ref: Optional[str] = None
     evidence_ref: List[str] = field(default_factory=list)
     created_by: Optional[str] = None
@@ -101,7 +104,7 @@ class SharedMemory:
             "memory_type": self.memory_type.value,
             "scope": self.scope.as_dict(),
             "content": self.content,
-            "status": self.status.value,
+            "status": self.status.value if self.status else None,
             "source_ref": self.source_ref,
             "evidence_ref": list(self.evidence_ref),
             "created_by": self.created_by,
@@ -125,7 +128,7 @@ class SharedMemory:
                 project_id=scope_data.get("project_id"),
                 task_id=scope_data.get("task_id"),
             ),
-            status=MemoryStatus(data.get("status", MemoryStatus.PROPOSED.value)),
+            status=(MemoryStatus(data["status"]) if data.get("status") in {item.value for item in MemoryStatus} else None),
             source_ref=data.get("source_ref"),
             evidence_ref=list(data.get("evidence_ref") or []),
             created_by=data.get("created_by"),
@@ -152,6 +155,8 @@ class ConflictReport:
     conflicts: List[Dict[str, Any]]
     query: Optional[str] = None
     mock: bool = False
+    available: bool = True
+    reason: Optional[str] = None
 
 
 # ---------------------------------------------------------------------------
@@ -352,9 +357,10 @@ class MemoryLakeAdapter:
     """MemoryLake MCP adapter using OAuth 2.1 and Streamable HTTP."""
 
     DEFAULT_URL = "https://app.memorylake.ai/memorylake/mcp/v2"
-    TOOL_SEARCH = "search_memory"
-    TOOL_ADD = "add_memory"
-    TOOL_DETECT_CONFLICTS = "detect_conflicts"
+    TOOL_INSPECT = "inspect"
+    TOOL_SEARCH = "search"
+    TOOL_REMEMBER = "remember"
+    TOOL_FORGET = "forget"
 
     def __init__(
         self,
@@ -385,7 +391,11 @@ class MemoryLakeAdapter:
         self._tool_schemas: Dict[str, Dict[str, Any]] = {}
         self._mock_store: Dict[str, SharedMemory] = {}
         self._oauth_authenticated = False
-        self._live_verified = False
+        self._mcp_discovery_verified = False
+        self._inspect_verified = False
+        self._read_verified = False
+        self._write_verified = False  # no remote write is enabled in this integration
+        self._last_search_diagnostics: Dict[str, Any] = {}
         self._last_error_type: Optional[str] = None
         self._credential_backend: Optional[str] = None
 
@@ -441,10 +451,20 @@ class MemoryLakeAdapter:
             mem.remote_id = f"mock-{mem.memory_id}"
             return mem
 
-        result = self._call_tool(self.TOOL_ADD, self._to_add_payload(mem))
-        mem.raw = result if isinstance(result, dict) else {"result": result}
-        mem.remote_id = self._extract_remote_id(result) or mem.memory_id
-        return mem
+        raise PermissionError(
+            "Live MemoryLake writes are disabled: the discovered 'remember' tool is a direct durable write, "
+            "not a pending proposal API. Store proposals locally and require explicit user approval first."
+        )
+
+    def inspect(self) -> Dict[str, Any]:
+        """Read the MemoryLake boundary/context without changing remote data."""
+        if self.mock:
+            self._inspect_verified = True
+            return {"projects": ([{"id": self.default_project_id}] if self.default_project_id else []),
+                    "facts": {"items": []}}
+        result = self._run_live(lambda client: self._inspect_live_async(client))
+        self._inspect_verified = True
+        return self._unwrap_result_envelope(result)
 
     def search(
         self, query: str, *, project_id: Optional[str] = None,
@@ -452,41 +472,49 @@ class MemoryLakeAdapter:
         status: Optional[MemoryStatus | str] = None, top_k: int = 8,
     ) -> List[MemorySearchHit]:
         project_id = project_id or self.default_project_id
+        if not project_id:
+            raise ValueError("project_id is required for project-scoped MemoryLake retrieval")
         if isinstance(memory_type, str):
             memory_type = MemoryType(memory_type)
         if isinstance(status, str):
             status = MemoryStatus(status)
         if self.mock:
             return self._mock_search(query, project_id, memory_type, status, top_k)
+        if memory_type not in (None, MemoryType.FACT):
+            return []  # The live MemoryLake search contract currently returns facts only.
 
-        args: Dict[str, Any] = {"query": query, "top_k": top_k}
-        if project_id:
-            args["project_id"] = project_id
-        if memory_type:
-            args["memory_type"] = memory_type.value
-        if status:
-            args["status"] = status.value
-        result = self._call_tool(self.TOOL_SEARCH, args)
-        return self._parse_search_result(result, project_id=project_id)
+        result = self._run_live(
+            lambda client: self._search_live_async(client, query, project_id, top_k)
+        )
+        if not self._has_search_result_shape(result):
+            raise RuntimeError("MemoryLake search returned an unrecognized response shape; retrieval is not verified.")
+        candidates = self._search_items(result)
+        hits = self._parse_search_result(result, project_id=project_id)
+        self._last_search_diagnostics = {
+            "response_keys": sorted(self._unwrap_result_envelope(result).keys())
+                if isinstance(self._unwrap_result_envelope(result), dict) else [],
+            "candidate_count": len(candidates),
+            "accepted_project_scoped_count": len(hits),
+            "rejected_or_unparsed_count": max(0, len(candidates) - len(hits)),
+        }
+        self._read_verified = True
+        if status is not None:
+            hits = [hit for hit in hits if hit.memory.status == status]
+        return hits
 
     def detect_conflicts(
         self, query: Optional[str] = None, *, project_id: Optional[str] = None,
     ) -> ConflictReport:
-        project_id = project_id or self.default_project_id
+        """Report availability honestly; the current live toolset has no conflict API."""
         if self.mock:
-            return ConflictReport(conflicts=[], query=query, mock=True)
-        args: Dict[str, Any] = {}
-        if query:
-            args["query"] = query
-        if project_id:
-            args["project_id"] = project_id
-        result = self._call_tool(self.TOOL_DETECT_CONFLICTS, args)
-        conflicts: List[Dict[str, Any]] = []
-        if isinstance(result, dict):
-            conflicts = list(result.get("conflicts") or result.get("items") or [])
-        elif isinstance(result, list):
-            conflicts = result
-        return ConflictReport(conflicts=conflicts, query=query, mock=False)
+            return ConflictReport(
+                conflicts=[], query=query, mock=True, available=False,
+                reason="Conflict detection is not implemented by the current adapter; no conflict check was performed.",
+            )
+        return ConflictReport(
+            conflicts=[], query=query, mock=False, available=False,
+            reason="The discovered MemoryLake toolset does not expose detect_conflicts; no conflict check was performed.",
+        )
 
     def list_resources(self) -> List[Dict[str, Any]]:
         if self.mock:
@@ -537,18 +565,30 @@ class MemoryLakeAdapter:
 
     def discover_tools(self) -> List[str]:
         if self.mock:
-            self._discovered_tools = [self.TOOL_SEARCH, self.TOOL_ADD, self.TOOL_DETECT_CONFLICTS]
+            self._discovered_tools = [
+                "inspect", "search", "list_files", "inspect_file", "run_code", "remember", "forget"
+            ]
+            self._tool_schemas = {}
             return list(self._discovered_tools)
 
         tools, schemas = self._run_live(self._list_tools_async)
         self._cache_tool_discovery(tools, schemas)
+        self._mcp_discovery_verified = True
         return list(self._discovered_tools or [])
 
     def health(self) -> Dict[str, Any]:
-        status = "mock" if self.mock else (
-            "live_verified" if self._live_verified else
-            "oauth_authenticated" if self._oauth_authenticated else "oauth_required_or_unverified"
-        )
+        if self.mock:
+            status = "mock"
+        elif self._read_verified:
+            status = "read_verified"
+        elif self._inspect_verified:
+            status = "inspect_verified"
+        elif self._mcp_discovery_verified:
+            status = "mcp_discovery_verified"
+        elif self._oauth_authenticated:
+            status = "oauth_authenticated_unverified"
+        else:
+            status = "oauth_required_or_unverified"
         return {
             "mock": self.mock,
             "mcp_url": self.mcp_url,
@@ -557,29 +597,29 @@ class MemoryLakeAdapter:
             "credential_backend": self._credential_backend,
             "default_project_id": self.default_project_id,
             "discovered_tools": list(self._discovered_tools or []),
+            "mcp_discovery_verified": self._mcp_discovery_verified,
+            "inspect_verified": self._inspect_verified,
+            "read_verified": self._read_verified,
+            "write_verified": self._write_verified,
+            "ready_for_retrieval": self._read_verified,
+            "ready_for_writes": False,
             "last_error_type": self._last_error_type,
             "status": status,
-            "live_ready": bool(self._live_verified),
+            # Backward-compatible field, deliberately stricter than discovery alone.
+            "live_ready": self._read_verified,
         }
 
     # ------------------------------------------------------------------
     # Payload mapping, MCP transport and result parsing
     # ------------------------------------------------------------------
 
-    def _to_add_payload(self, mem: SharedMemory) -> Dict[str, Any]:
+    @staticmethod
+    def _search_payload(query: str, project_id: str, top_k: int) -> Dict[str, Any]:
         return {
-            "content": mem.content,
-            "metadata": {
-                "memory_id": mem.memory_id, "memory_type": mem.memory_type.value,
-                "status": mem.status.value, "scope": mem.scope.as_dict(),
-                "source_ref": mem.source_ref, "evidence_ref": mem.evidence_ref,
-                "created_by": mem.created_by, "created_at": mem.created_at,
-                "confidence": mem.confidence, "version": mem.version,
-                "supersedes": mem.supersedes, "conflicts_with": mem.conflicts_with,
-                "expires_at": mem.expires_at,
-            },
-            "project_id": mem.scope.project_id,
-            "type": mem.memory_type.value,
+            "queries": [str(query or "project context")],
+            "project_ids": [project_id],
+            "return_types": ["fact"],
+            "top_n": max(1, min(int(top_k), 100)),
         }
 
     @staticmethod
@@ -596,7 +636,6 @@ class MemoryLakeAdapter:
         try:
             result = self._run_awaitable(self._run_live_async(operation))
             self._last_error_type = None
-            self._live_verified = True
             return result
         except Exception as exc:
             self._last_error_type = type(exc).__name__
@@ -672,11 +711,19 @@ class MemoryLakeAdapter:
     def _cache_tool_discovery(self, tools: List[str], schemas: Dict[str, Dict[str, Any]]) -> None:
         self._discovered_tools = list(tools)
         self._tool_schemas = dict(schemas)
+        self._mcp_discovery_verified = True
 
     def _filter_tool_arguments(self, name: str, arguments: Dict[str, Any], schema: Dict[str, Any]) -> Dict[str, Any]:
+        if name in {self.TOOL_REMEMBER, self.TOOL_FORGET}:
+            action = "write durable facts" if name == self.TOOL_REMEMBER else "delete facts"
+            raise PermissionError(f"MemoryLake '{name}' would {action}; this integration blocks remote writes/deletes.")
         properties = schema.get("properties")
-        if not isinstance(properties, dict) or not properties:
-            return dict(arguments)
+        if not isinstance(properties, dict):
+            if arguments or schema.get("required"):
+                raise RuntimeError(f"MemoryLake tool '{name}' schema is missing its properties mapping")
+            return {}
+        if arguments and not properties:
+            raise RuntimeError(f"MemoryLake tool '{name}' exposes no input properties; refusing to drop supplied arguments")
         filtered = {key: value for key, value in arguments.items() if key in properties}
         required = schema.get("required") or []
         missing = [key for key in required if key not in filtered]
@@ -685,12 +732,6 @@ class MemoryLakeAdapter:
                 f"MemoryLake tool '{name}' requires arguments not mapped by this adapter: {missing}. "
                 "Inspect discovered_tool_schemas before changing the payload mapping."
             )
-        if name == self.TOOL_ADD and "project_id" in arguments:
-            # Do not write project-scoped memory if the server schema cannot carry scope.
-            if "project_id" not in properties and "metadata" not in properties:
-                raise RuntimeError(
-                    "MemoryLake add_memory schema does not expose project_id or metadata; refusing an unscoped write."
-                )
         return filtered
 
     @staticmethod
@@ -720,11 +761,10 @@ class MemoryLakeAdapter:
             return values[0]
         return values
 
-    async def _call_tool_async(self, client, name: str, arguments: Dict[str, Any]):
-        # A fresh MCP session is created per synchronous adapter call; refresh
-        # schemas in that session so a remote schema change cannot use stale args.
-        tools, schemas = await self._list_tools_async(client)
-        self._cache_tool_discovery(tools, schemas)
+    async def _call_discovered_tool_async(
+        self, client, name: str, arguments: Dict[str, Any], schemas: Dict[str, Dict[str, Any]],
+    ) -> Any:
+        tools = self._discovered_tools or []
         if name not in tools:
             raise RuntimeError(
                 f"MemoryLake MCP server does not expose required tool '{name}'. Discovered tools: {tools}"
@@ -732,6 +772,33 @@ class MemoryLakeAdapter:
         filtered = self._filter_tool_arguments(name, arguments, schemas.get(name, {}))
         result = await client.call_tool(name, filtered)
         return self._tool_result_value(result, name)
+
+    async def _call_tool_async(self, client, name: str, arguments: Dict[str, Any]):
+        tools, schemas = await self._list_tools_async(client)
+        self._cache_tool_discovery(tools, schemas)
+        return await self._call_discovered_tool_async(client, name, arguments, schemas)
+
+    async def _inspect_live_async(self, client) -> Any:
+        tools, schemas = await self._list_tools_async(client)
+        self._cache_tool_discovery(tools, schemas)
+        result = await self._call_discovered_tool_async(client, self.TOOL_INSPECT, {}, schemas)
+        return self._unwrap_result_envelope(result)
+
+    async def _search_live_async(self, client, query: str, project_id: str, top_k: int) -> Any:
+        # The MemoryLake tool description requires inspect before search. Do both
+        # in the same MCP session and fail closed if the configured project is
+        # not among the current authorization boundary projects.
+        tools, schemas = await self._list_tools_async(client)
+        self._cache_tool_discovery(tools, schemas)
+        inspect_result = await self._call_discovered_tool_async(client, self.TOOL_INSPECT, {}, schemas)
+        self._inspect_verified = True
+        allowed_projects = self._extract_project_ids(self._unwrap_result_envelope(inspect_result))
+        if project_id not in allowed_projects:
+            raise PermissionError(
+                "Configured MEMORYLAKE_PROJECT_ID is not present in MemoryLake inspect boundary; refusing retrieval."
+            )
+        search_args = self._search_payload(query, project_id, top_k)
+        return await self._call_discovered_tool_async(client, self.TOOL_SEARCH, search_args, schemas)
 
     def _call_tool(self, name: str, arguments: Dict[str, Any]) -> Any:
         if self.mock:
@@ -749,55 +816,179 @@ class MemoryLakeAdapter:
         result = await client.read_resource(uri)
         return result.model_dump(mode="json", by_alias=True) if hasattr(result, "model_dump") else dict(result)
 
-    def _parse_search_result(self, result: Any, project_id: Optional[str] = None) -> List[MemorySearchHit]:
-        hits: List[MemorySearchHit] = []
-        items: List[Any] = []
-        if isinstance(result, dict):
-            items = result.get("memories") or result.get("results") or result.get("items") or []
-        elif isinstance(result, list):
-            items = result
-        for item in items:
-            if not isinstance(item, dict):
+    @staticmethod
+    def _unwrap_result_envelope(result: Any) -> Any:
+        """Unwrap MCP/server result envelopes without assuming a fixed depth."""
+        for _ in range(4):
+            if isinstance(result, dict) and set(result) == {"result"}:
+                result = result["result"]
                 continue
-            meta = item.get("metadata") if isinstance(item.get("metadata"), dict) else item
-            content = item.get("content") or meta.get("content") or ""
-            mid = meta.get("memory_id") or item.get("id") or str(uuid.uuid4())
-            try:
-                mtype = MemoryType(meta.get("memory_type") or meta.get("type") or "fact")
-            except ValueError:
-                mtype = MemoryType.FACT
-            try:
-                status = MemoryStatus(meta.get("status") or "proposed")
-            except ValueError:
-                status = MemoryStatus.PROPOSED
-            scope_data = dict(meta.get("scope") or {})
-            # Do not invent remote provenance. The requested project is only a local fallback;
-            # memory_node separately requires explicit project metadata for LIVE results.
-            if project_id and not scope_data.get("project_id"):
-                scope_data["project_id"] = project_id
-            mem = SharedMemory(
-                memory_id=str(mid), memory_type=mtype, content=content,
-                scope=MemoryScope(user_id=scope_data.get("user_id"),
-                                  project_id=scope_data.get("project_id"),
-                                  task_id=scope_data.get("task_id")),
-                status=status, source_ref=meta.get("source_ref"),
-                evidence_ref=list(meta.get("evidence_ref") or []),
-                created_by=meta.get("created_by"), created_at=meta.get("created_at"),
-                confidence=float(meta.get("confidence") or 0.0),
-                version=int(meta.get("version") or 1),
-                remote_id=item.get("id") or meta.get("remote_id"), raw=item,
-            )
-            score = item.get("score") or item.get("similarity")
-            snippet = item.get("snippet") or (content[:200] if content else None)
-            hits.append(MemorySearchHit(memory=mem, score=score, snippet=snippet))
-        return hits
+            if isinstance(result, str):
+                try:
+                    result = json.loads(result)
+                    continue
+                except json.JSONDecodeError:
+                    return result
+            break
+        return result
+
+    @classmethod
+    def _extract_project_ids(cls, result: Any) -> set[str]:
+        """Extract IDs only from explicit project lists in inspect/boundary containers."""
+        result = cls._unwrap_result_envelope(result)
+        found: set[str] = set()
+        containers = [result]
+        # Inspect responses may wrap the boundary under one of these known
+        # structural keys. Do not recurse through facts/files: their metadata
+        # must not accidentally expand the authorization boundary.
+        container_keys = ("data", "boundary", "workspace", "context", "inspection")
+        cursor = 0
+        while cursor < len(containers):
+            parent = containers[cursor]
+            cursor += 1
+            if isinstance(parent, dict):
+                for key in container_keys:
+                    child = parent.get(key)
+                    if isinstance(child, dict) and all(child is not seen for seen in containers):
+                        containers.append(child)
+        for container in containers:
+            if not isinstance(container, dict):
+                continue
+            for key in ("projects", "boundary_projects"):
+                entries = container.get(key)
+                if not isinstance(entries, list):
+                    continue
+                for item in entries:
+                    if isinstance(item, str):
+                        found.add(item)
+                    elif isinstance(item, dict):
+                        project_id = item.get("project_id") or item.get("id")
+                        if isinstance(project_id, str) and project_id:
+                            found.add(project_id)
+        return found
 
     @staticmethod
-    def _extract_remote_id(result: Any) -> Optional[str]:
-        if isinstance(result, dict):
-            data = result.get("data") if isinstance(result.get("data"), dict) else {}
-            return result.get("id") or result.get("memory_id") or data.get("id")
+    def _explicit_project_id(item: Dict[str, Any]) -> Optional[str]:
+        """Read an explicit project scope; never infer it from the query argument."""
+        candidates = [item]
+        for key in ("metadata", "meta", "attributes", "fact"):
+            nested = item.get(key)
+            if isinstance(nested, dict):
+                candidates.append(nested)
+        for candidate in candidates:
+            scope = candidate.get("scope")
+            if isinstance(scope, str) and scope.startswith("project:"):
+                return scope.split(":", 1)[1] or None
+            if isinstance(scope, dict):
+                value = scope.get("project_id") or scope.get("projectId")
+                if isinstance(value, str) and value:
+                    return value
+            value = candidate.get("project_id") or candidate.get("projectId")
+            if isinstance(value, str) and value:
+                return value
+            project = candidate.get("project")
+            if isinstance(project, dict):
+                value = project.get("id") or project.get("project_id")
+                if isinstance(value, str) and value:
+                    return value
         return None
+
+    @classmethod
+    def _has_search_result_shape(cls, result: Any) -> bool:
+        result = cls._unwrap_result_envelope(result)
+        if isinstance(result, list):
+            return True
+        if not isinstance(result, dict):
+            return False
+        for key in ("facts", "memories", "results", "items", "matches", "data"):
+            if key in result:
+                value = result[key]
+                return isinstance(value, (list, dict))
+        return any(key in result for key in ("fact_id", "memory_id", "content", "text"))
+
+    @classmethod
+    def _search_items(cls, result: Any) -> List[Any]:
+        result = cls._unwrap_result_envelope(result)
+        if isinstance(result, list):
+            return result
+        if not isinstance(result, dict):
+            return []
+        for key in ("facts", "memories", "results", "items", "matches", "data"):
+            value = result.get(key)
+            if isinstance(value, list):
+                return value
+            if isinstance(value, dict):
+                for nested_key in ("items", "results", "matches"):
+                    nested = value.get(nested_key)
+                    if isinstance(nested, list):
+                        return nested
+                if any(field in value for field in ("fact_id", "memory_id", "content", "text")):
+                    return [value]
+        # Some tools return a single fact object rather than a result list.
+        if any(key in result for key in ("fact_id", "memory_id", "content", "text")):
+            return [result]
+        return []
+
+    def _parse_search_result(self, result: Any, project_id: Optional[str] = None) -> List[MemorySearchHit]:
+        hits: List[MemorySearchHit] = []
+        for item in self._search_items(result):
+            if not isinstance(item, dict):
+                continue
+            nested_fact = item.get("fact")
+            raw = nested_fact if isinstance(nested_fact, dict) else item
+            raw_meta = next((raw.get(key) for key in ("metadata", "meta", "attributes")
+                             if isinstance(raw.get(key), dict)), {})
+            outer_meta = next((item.get(key) for key in ("metadata", "meta", "attributes")
+                               if isinstance(item.get(key), dict)), {})
+            meta = raw_meta or outer_meta or raw
+            content = (raw.get("content") or raw.get("text") or raw.get("value") or raw.get("fact")
+                       or meta.get("content") or meta.get("text") or item.get("content") or item.get("text"))
+            if not isinstance(content, str) or not content.strip():
+                continue
+            explicit_project_id = self._explicit_project_id(raw) or self._explicit_project_id(item)
+            if explicit_project_id is None or (project_id and explicit_project_id != project_id):
+                # Search is project-filtered remotely, but we still require
+                # explicit provenance in the returned fact before using it.
+                continue
+            mid = (raw.get("fact_id") or raw.get("memory_id") or raw.get("id")
+                   or meta.get("fact_id") or meta.get("memory_id") or meta.get("id")
+                   or item.get("fact_id") or item.get("memory_id") or item.get("id"))
+            if not isinstance(mid, str) or not mid:
+                continue
+            try:
+                mtype = MemoryType(meta.get("memory_type") or meta.get("type") or item.get("type") or "fact")
+            except ValueError:
+                mtype = MemoryType.FACT
+            raw_status = meta.get("status") or raw.get("status") or item.get("status")
+            try:
+                normalized_status = str(raw_status).strip().lower() if raw_status is not None else None
+                status = MemoryStatus(normalized_status) if normalized_status in {value.value for value in MemoryStatus} else None
+            except (TypeError, ValueError):
+                status = None
+            scope_data = raw.get("scope") if isinstance(raw.get("scope"), dict) else {}
+            if not scope_data and isinstance(meta.get("scope"), dict):
+                scope_data = meta["scope"]
+            if not scope_data and isinstance(item.get("scope"), dict):
+                scope_data = item["scope"]
+            mem = SharedMemory(
+                memory_id=str(mid), memory_type=mtype, content=content,
+                scope=MemoryScope(
+                    user_id=scope_data.get("user_id") or meta.get("user_id") or item.get("user_id"),
+                    project_id=explicit_project_id,
+                    task_id=scope_data.get("task_id") or meta.get("task_id") or item.get("task_id"),
+                ),
+                status=status, source_ref=meta.get("source_ref") or item.get("source_ref"),
+                evidence_ref=list(meta.get("evidence_ref") or item.get("evidence_ref") or []),
+                created_by=meta.get("created_by") or item.get("created_by"),
+                created_at=meta.get("created_at") or item.get("created_at"),
+                confidence=float(meta.get("confidence") or item.get("confidence") or 0.0),
+                version=int(meta.get("version") or item.get("version") or 1),
+                remote_id=str(mid), raw=item,
+            )
+            score = item.get("score") or raw.get("score") or item.get("similarity") or raw.get("similarity")
+            snippet = item.get("snippet") or raw.get("snippet") or content[:200]
+            hits.append(MemorySearchHit(memory=mem, score=score, snippet=snippet))
+        return hits
 
     def _mock_search(
         self, query: str, project_id: Optional[str], memory_type: Optional[MemoryType],

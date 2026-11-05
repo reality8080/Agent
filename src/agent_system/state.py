@@ -45,6 +45,11 @@ class AgentState(TypedDict, total=False):
     memory_mock: bool
     memory_status: str
     memory_conflicts: List[Dict[str, Any]]
+    memory_conflicts_status: str
+    memory_error: Optional[str]
+    memory_hits_received: int
+    memory_hits_eligible: int
+    memory_rejected_unknown_status: int
     memory_proposal: Dict[str, Any]
 
     problem_brief: str

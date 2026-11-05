@@ -1,0 +1,60 @@
+{
+  "patch": "Agent System v0.5 MemoryLake live-contract correction",
+  "created": "2026-11-05",
+  "files": [
+    {
+      "path": "README.md",
+      "base_sha256": "45820bbfffd197392bca92132895bfc6e473c6e7629b23ec5804dc0532fd5012",
+      "patch_sha256": "83b60aa48df5d1979d7754febdda1aa645b080e67fcb086995d27dfc67b8ce6e",
+      "new_file": false
+    },
+    {
+      "path": "docs/MEMORYLAKE_MCP_SETUP.md",
+      "base_sha256": "8b94271e71fe4d0ed19b1d83dd609a24021682694e437356849275448467a387",
+      "patch_sha256": "14e0ec49f94a62e03159a66947dd2fa80f152262a25f63e3c2d354ab4f42c128",
+      "new_file": false
+    },
+    {
+      "path": "scripts/memorylake_read_probe.py",
+      "base_sha256": null,
+      "patch_sha256": "d1c7baa880a78fce181db5a36831f67f016541b02e7ee2b06199917d06ada690",
+      "new_file": true
+    },
+    {
+      "path": "src/adapters/memorylake_adapter.py",
+      "base_sha256": "a38b6648eeb09781d9c9be7e353ed6a80dde5bfbb948cb3db1b65c00e3d84c8f",
+      "patch_sha256": "ea75eba0f3cd70ba769c241470bf7a2bdc45b33407d474cc5dfc08bfac871019",
+      "new_file": false
+    },
+    {
+      "path": "src/agent_system/nodes/deliver_node.py",
+      "base_sha256": "bb2082ac5f90c5f4ad14768778ba17d967a9f20066a10b5f683b4b297aa91472",
+      "patch_sha256": "7549fdb53a89b3bf4d9138ba393560666dca0d52f313763802d2b82fa863f291",
+      "new_file": false
+    },
+    {
+      "path": "src/agent_system/nodes/memory_node.py",
+      "base_sha256": "a89ef53923e118fca790b583a0ae0788b07682b2792a86518968dffc467e31d2",
+      "patch_sha256": "f9f1573864fb28bc3722a9367f54caf46d4d37aef464a9affdc54fc6cc134f41",
+      "new_file": false
+    },
+    {
+      "path": "src/agent_system/state.py",
+      "base_sha256": "46b08493d7e1a634a88cf587d06c758e1b8fe5780a5e4f447612d33480b0a373",
+      "patch_sha256": "9e6a33236ef45e5339e1f79e139bed45045466b40f75bf658e5a303850ea0987",
+      "new_file": false
+    },
+    {
+      "path": "src/tests/test_memorylake_adapter.py",
+      "base_sha256": "3490741e90d20d1d60ac772513f14b2674a6aaf4b04d5b912a4b99a796f891e2",
+      "patch_sha256": "cdddf8fa0e00cedda253d658617b57eeae406c1e4d3aac8e40d8e862d5356666",
+      "new_file": false
+    },
+    {
+      "path": "src/tests/test_permission_and_recovery.py",
+      "base_sha256": "3453d01176afa0f26005a2c039f22e8a19cef778dbc11490588aaedd680f25a0",
+      "patch_sha256": "69276bacaf20a14a5b1787311cd0c6ab7529e2d7bd42fb58e3bd5cf7820083b1",
+      "new_file": false
+    }
+  ]
+}

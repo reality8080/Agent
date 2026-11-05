@@ -222,19 +222,31 @@ def test_planner_one_model_and_workspace_bound_scope(monkeypatch, tmp_path):
     assert result["status"] == "waiting_approval"
 
 
-def test_memorylake_proposal_stays_proposed_or_disputed(monkeypatch):
-    from agent_system.nodes.deliver_node import _memory_proposal
-    from agent_system.runtime import clear_runtime_caches
+def test_memorylake_proposal_is_local_pending_and_never_calls_remote(monkeypatch, tmp_path):
+    from agent_system.nodes.deliver_node import _memory_proposal, deliver_node
     from agent_system.storage.event_ledger import EventLedger
     monkeypatch.setenv("MEMORYLAKE_PROJECT_ID", "project-test")
-    monkeypatch.setenv("MEMORYLAKE_MOCK", "1")
-    clear_runtime_caches()
     result = _memory_proposal({"status": "completed_with_warnings", "task_id": "t1", "run_id": "r1",
                               "git_diff": "", "files_changed": [], "test_results": {"status": "not_run"},
                               "review_status": "not_verified"})
-    assert result["status"] in ("proposed", "disputed")
-    assert result["mock"] is True
-    clear_runtime_caches()
+    assert result["status"] == "pending_local_approval"
+    assert result["storage"] == "sqlite_event_ledger"
+    assert result["approval_required"] is True
+    assert result["remote_write"] is False
+    assert "Task outcome" in result["content"]
+
+    delivered = deliver_node({"status": "completed_with_warnings", "task_id": "t1", "run_id": "r1",
+                              "git_diff": "", "files_changed": [], "test_results": {"status": "not_run"},
+                              "review_status": "not_verified", "memory_conflicts_status": "unavailable"})
+    ledger = EventLedger(str(tmp_path / "events.sqlite"))
+    for index, event in enumerate(delivered["events"]):
+        ledger.append(event_type=event["type"], action_id=f"run-proposal:{index}:{event['type']}",
+                      thread_id="thread-proposal", task_id="t1", run_id="r1", payload=event)
+    events = ledger.list_for_thread("thread-proposal")
+    proposals = [event for event in events if event["event_type"] == "memory_proposal"]
+    assert len(proposals) == 1
+    assert "pending_local_approval" in proposals[0]["payload"]
+    assert "remote_write" in proposals[0]["payload"]
 
 
 def test_real_graph_pause_resume_is_available_when_dependencies_installed(monkeypatch, tmp_path):
@@ -491,15 +503,20 @@ def test_live_memory_without_explicit_project_provenance_is_discarded(monkeypatc
     proposed = SharedMemory("proposed", MemoryType.FACT, "unreviewed proposal", MemoryScope(project_id="project-a"),
                              MemoryStatus.PROPOSED, raw={
                                  "metadata": {"scope": {"project_id": "project-a"}, "status": "proposed"}})
+    unknown_status = SharedMemory("unknown", MemoryType.FACT, "status not provided", MemoryScope(project_id="project-a"),
+                                  None, raw={"metadata": {"scope": {"project_id": "project-a"}}})
     class LiveAdapter:
         mock = False
         def search(self, query, **kwargs):
-            if kwargs.get("status") == MemoryStatus.VERIFIED:
-                # Simulate a remote search tool that ignores an unsupported status filter.
-                return [MemorySearchHit(valid), MemorySearchHit(unscoped), MemorySearchHit(proposed)]
-            return []
+            assert "status" not in kwargs  # server schema has no status parameter
+            return [MemorySearchHit(valid), MemorySearchHit(unscoped), MemorySearchHit(proposed),
+                    MemorySearchHit(unknown_status)]
         def detect_conflicts(self, **kwargs):
-            return SimpleNamespace(conflicts=[], mock=False)
+            return SimpleNamespace(conflicts=[], mock=False, available=False)
     monkeypatch.setattr("agent_system.runtime.get_memorylake_adapter", lambda: LiveAdapter())
     result = memory_retrieval_node({"user_request": "project data"})
     assert [item["memory_id"] for item in result["memory_results"]] == ["valid"]
+    assert result["memory_conflicts_status"] == "unavailable"
+    assert result["memory_hits_received"] == 4
+    assert result["memory_hits_eligible"] == 1
+    assert result["memory_rejected_unknown_status"] == 1

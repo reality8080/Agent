@@ -78,26 +78,34 @@ If port 8765 is occupied, set `MEMORYLAKE_OAUTH_CALLBACK_PORT` to another free l
 
 The VS Code authorization is not automatically shared with the Python process. The Agent System performs its own OAuth authorization once and then reuses its securely stored credentials.
 
-## 5. Adapter API and workflow
+## 5. Observed live tool contract and Agent behavior
 
-The public adapter API remains synchronous to avoid changing LangGraph nodes:
+The user's authenticated endpoint discovery on 2026-11-05 returned these tools:
 
-```python
-adapter.discover_tools()
-adapter.search(query, project_id=project_id)
-adapter.detect_conflicts(query=query, project_id=project_id)
-adapter.propose_memory(content, project_id=project_id, ...)
-```
+- `inspect` — no arguments; its description says to call it first in each conversation.
+- `search` — required `queries`; optional `project_ids`, `return_types`, `top_n`.
+- `list_files` — optional `name_filter`, `project_ids`, `cursor`.
+- `inspect_file` — required `file_id`; optional `include_download_url`.
+- `run_code` — required `code`; optional `executor_id`, `file_ids`, `language`.
+- `remember` — required `facts`; optional `scope`. This writes durable facts immediately.
+- `forget` — required `fact_ids`; optional `scope`. This deletes facts.
 
-The internal implementation uses MCP SDK v2 `Client`, `streamable_http_client`, `OAuthClientProvider` and `httpx2.AsyncClient`.
+This endpoint-specific discovery takes precedence over older integration examples that show `search_memory`, `add_memory` and `detect_conflicts`.
 
-- Retrieval remains before Planner.
-- Memory proposals remain after Deliver.
-- Agent writes default to `proposed`; agents cannot self-promote to `approved` or `verified`.
-- `discover_tools()` reports only names returned by the server. It does not substitute documented names after a discovery failure.
-- `health()['live_ready']` becomes true only after a successful live MCP operation, not merely because `MEMORYLAKE_MOCK=0`.
-- A live memory write is refused if the discovered `add_memory` schema cannot carry project scope through `project_id` or `metadata`.
-- Exact search/write schemas are discovered at runtime. If required fields are not mapped, the adapter fails closed and reports the missing field names rather than guessing.
+Live retrieval behavior:
+
+1. Discover the current tool schemas from the authenticated endpoint.
+2. Call `inspect` before `search` in the same MCP session.
+3. Confirm `MEMORYLAKE_PROJECT_ID` is present in the projects visible to `inspect`.
+4. Call `search` with `queries=[query]`, `project_ids=[project_id]`, `return_types=["fact"]`, and `top_n` from 1 to 100.
+5. Require explicit returned fact scope matching the configured project. Unscoped or mismatched facts are discarded.
+6. Preserve missing remote status as `None`; do not infer `approved` or `verified` when the server did not return a status.
+
+The current live tool schema has no `status` filter and no `detect_conflicts` method. Conflict checks are therefore reported as unavailable, not as “zero conflicts”.
+
+**Remote writes are disabled.** `remember` is a direct durable write and is not a staging/proposal endpoint. `forget` is destructive. Agent Deliver creates a local pending proposal that is included in the append-only SQLite Event Ledger; it does not call either remote tool. A separate explicit user-approval workflow is required before any future live write integration.
+
+Health reporting distinguishes OAuth authentication, MCP discovery, inspect and read verification. Successful `tools/list` alone is not retrieval readiness. `ready_for_writes` remains false.
 
 ## 6. Verification stages
 
@@ -105,7 +113,10 @@ Start with read-only discovery:
 
 ```powershell
 python .\scripts\memorylake_mcp_probe.py
+python .\scripts\memorylake_read_probe.py --query "Agent System project context"
 ```
+
+The first command verifies OAuth and tool discovery only. The second is read-only: it checks the inspect boundary and runs one project-scoped fact search; it prints identifiers/scope and response shape, not fact content. It does not call `remember` or `forget`.
 
 Then run local tests:
 
@@ -114,7 +125,7 @@ python -m compileall -q .\src .\run_agent.py .\scripts
 python -m pytest .\src\tests -q -rs
 ```
 
-Only after successful discovery should a separate QA task perform a retrieval. A proposal/write test must use a dedicated QA project or clearly isolated QA memory boundary; do not test writes against production memory.
+After discovery, run the read-only retrieval probe. There is currently no remote proposal/write test: `remember` writes durable facts immediately and is blocked by this integration. Local pending proposals are written only to the SQLite Event Ledger. Do not call `remember` or `forget` as part of acceptance testing.
 
 Classify outcomes accurately:
 - `PASS`: live MCP initialize/discovery or operation succeeded with captured output.
@@ -129,5 +140,6 @@ Mock tests do not prove Live connectivity.
 - This adapter does not replace LangGraph Checkpointer or SQLite Event Ledger.
 - This adapter does not automatically map a MemoryLake Workspace ID to Agent `project_id`.
 - Live retrieval must preserve explicit project provenance; unscoped results must not enter Planner context.
-- Live promotion remains unavailable unless the server exposes a documented update/promote operation.
+- Live conflict detection is unavailable with the currently discovered toolset; the Agent reports this limitation explicitly.
+- Remote `remember` and `forget` are blocked; live promotion is unavailable unless the server exposes a documented update/promote operation and a separate approval path is implemented.
 - The adapter does not use the Personal REST API Key for MCP OAuth.
