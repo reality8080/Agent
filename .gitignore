@@ -12,5 +12,5 @@ venv/
 .DS_Store
 .mcp.json
 data/
-workspace/
+workspace*/
 !workspace/.gitkeep
