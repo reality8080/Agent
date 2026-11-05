@@ -96,7 +96,7 @@ Khi Gate 2 có privileged action, lần resume bổ sung sẽ xuất hiện sau 
 
 ## Live configuration
 
-Sau khi mock tests đạt, đặt `LLM_MOCK=0`, `SEARCH_MOCK=0`, `MEMORYLAKE_MOCK=0` và cung cấp API credentials qua environment/.env. Cấu hình đúng một model ID qua `LLM_MODEL`; không dùng `LLM_MODEL_PLAN`/`LLM_MODEL_CODING` để tách model. `TAVILY_API_KEY` và `MEMORYLAKE_PROJECT_ID` là tùy chọn theo nhu cầu. `LAYA_MOCK=0` chỉ hoạt động khi cài được Laya CPU dependency tương thích.
+Sau khi mock tests đạt, đặt `LLM_MOCK=0`, `SEARCH_MOCK=0`, `MEMORYLAKE_MOCK=0`. Cấu hình đúng một model ID qua `LLM_MODEL`; không dùng `LLM_MODEL_PLAN`/`LLM_MODEL_CODING` để tách model. `TAVILY_API_KEY` và `MEMORYLAKE_PROJECT_ID` là tùy chọn theo nhu cầu. MemoryLake MCP dùng OAuth 2.1 qua browser; không dùng Personal REST API Key làm MCP Bearer token. Xem `docs/MEMORYLAKE_MCP_SETUP.md`. `LAYA_MOCK=0` chỉ hoạt động khi cài được Laya CPU dependency tương thích.
 
 ```dotenv
 LLM_PROVIDER=gemini
@@ -104,9 +104,10 @@ LLM_MODEL=gemini/gemini-3.5-flash-lite
 LLM_MOCK=0
 TAVILY_API_KEY=...
 SEARCH_MOCK=0
+MEMORYLAKE_MCP_URL=https://app.memorylake.ai/memorylake/mcp/v2
 MEMORYLAKE_PROJECT_ID=...
-MEMORYLAKE_MCP_TOKEN=...
 MEMORYLAKE_MOCK=0
+MEMORYLAKE_OAUTH_CALLBACK_PORT=8765
 LAYA_MOCK=0
 ```
 

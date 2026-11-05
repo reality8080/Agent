@@ -1,153 +1,133 @@
-# MemoryLake MCP Integration — Agent System v0.5 (Task 05)
+# MemoryLake MCP OAuth 2.1 — Agent System v0.5
 
-## 1. Official surface (verified from public docs)
+## 1. Connection model
 
-| Item | Value |
-|------|--------|
-| MCP endpoint | `https://mcp.memorylake.ai` |
-| Transport | HTTP (Streamable HTTP / JSON-RPC style) |
-| Auth | `Authorization: Bearer <TOKEN>` |
-| Token type | **Project-scoped** preferred (dashboard → project → API Keys / MCP token) |
-| Documented MCP methods | `resources/list`, `resources/read` |
-| Documented tools | `search_memory`, `add_memory`, `detect_conflicts` |
+This project uses the **MemoryLake Memory MCP** endpoint shown by the account's MCP setup page:
 
-Sources:
-- https://www.memorylake.ai/en/integrations/mcp
-- https://docs.memorylake.ai/features/memorylake/api-reference/overview
-- https://docs.memorylake.ai/features/memorylake/api-reference/authentication
-
-**Important:** Exact tool argument schemas are not fully published in the marketing page. The adapter uses a conservative payload and **must** call `discover_tools()` / `tools/list` on first live session. Do not assume extra tools (update, delete, promote) exist until discovery confirms them.
-
-## 2. Create project + project-scoped token
-
-1. Sign up / log in at https://app.memorylake.ai/
-2. Create or open a **Workspace**, then a **Project** (this becomes the Spec `project_id` namespace).
-3. In the project, open **API Keys** (or MCP / Endpoint section).
-4. Create a key intended for this project only (project-scoped).
-5. Copy the secret once (`sk_…` or MCP bearer). Store only in `.env`.
-6. Optionally note the project id (`proj-…` or custom_id) → set `MEMORYLAKE_PROJECT_ID`.
-
-CLI alternative (if installed):
-
-```bash
-# https://github.com/memorylake-ai/memorylake-cli
-memorylake auth login
-memorylake workspace use
-memorylake project create --name "AgentSystem" --custom-id agent-system-mvp
-# then create API key from dashboard or key commands
+```text
+https://app.memorylake.ai/memorylake/mcp/v2
 ```
 
-## 3. Environment configuration
+The MCP page labels this integration **OAuth 2.1**. It is a different credential flow from the Personal API Key page:
 
-Add to project `.env` (never commit):
+| Credential | Intended surface | Used by this adapter |
+|---|---|---|
+| Personal API Key | MemoryLake REST API V3 | No |
+| MCP OAuth authorization | MemoryLake MCP | Yes |
 
-```bash
-# MemoryLake MCP
-MEMORYLAKE_MCP_URL=https://mcp.memorylake.ai
-MEMORYLAKE_MCP_TOKEN=          # project-scoped bearer; leave empty → mock
-MEMORYLAKE_PROJECT_ID=         # e.g. proj-... or custom_id
-MEMORYLAKE_USER_ID=            # optional actor id
-MEMORYLAKE_MOCK=1              # explicitly force mock; missing token alone does NOT auto-mock
+Do not put a Personal API Key in `MEMORYLAKE_MCP_TOKEN` and expect it to authenticate the OAuth-protected MCP endpoint. The adapter keeps the old constructor argument for compatibility, but it does not send that value as a Bearer token.
+
+The MCP endpoint and authorization server perform OAuth metadata discovery, dynamic client registration (when advertised), authorization-code + PKCE, token exchange and refresh through the official MCP Python SDK. The user chooses Personal/Team, Workspace and Memory boundary in the MemoryLake consent screen.
+
+## 2. Requirements
+
+Install adapter dependencies in the project's virtual environment:
+
+```powershell
+python -m pip install -r .\src\adapters\requirements-adapters.txt
 ```
 
-Adapter also respects the same variables when constructed without explicit args. A missing token does not silently switch to mock; use `MEMORYLAKE_MOCK=1` for offline runs, otherwise the live connection must be configured and verified.
+The OAuth client uses:
+- `mcp>=2.3.0,<3` (MCP SDK v2 API)
+- `keyring>=25.0.0` (Windows Credential Manager backend)
+- the SDK-provided `httpx2` transport dependency
 
-## 4. Adapter location & usage
+On Windows, verify the credential backend before authorization:
 
+```powershell
+python -c "import keyring; b=keyring.get_keyring(); print(type(b).__name__, b.priority)"
 ```
-src/adapters/memorylake_adapter.py
-src/tests/test_memorylake_adapter.py
+
+The backend priority must be greater than zero. The adapter refuses to store OAuth credentials through a plaintext/fail backend.
+
+## 3. Environment
+
+Add these non-secret settings to `.env`:
+
+```dotenv
+MEMORYLAKE_MCP_URL=https://app.memorylake.ai/memorylake/mcp/v2
+MEMORYLAKE_PROJECT_ID=your-agent-project-scope
+MEMORYLAKE_USER_ID=
+MEMORYLAKE_MOCK=0
+MEMORYLAKE_OAUTH_CALLBACK_PORT=8765
 ```
+
+`MEMORYLAKE_PROJECT_ID` is the Agent System's internal project scope. The OAuth consent's Workspace/Memory boundary is the remote account boundary. Do not assume their identifiers are interchangeable.
+
+Do not store OAuth access tokens or refresh tokens in `.env`. The adapter stores OAuth tokens and dynamic client registration data through the OS credential manager, namespaced by MCP endpoint. Do not commit or log credential values.
+
+`MEMORYLAKE_MCP_TOKEN` is deprecated for this OAuth MCP endpoint and ignored by the adapter. Keep a Personal REST API Key separate if another REST integration needs it.
+
+## 4. First authorization and read-only discovery
+
+From the repository root, with `.venv` active:
+
+```powershell
+python .\scripts\memorylake_mcp_probe.py
+```
+
+On first use:
+1. The adapter starts a loopback callback listener on `127.0.0.1:8765`.
+2. Your default browser opens the MemoryLake OAuth consent page.
+3. Choose the intended Personal/Team, Workspace and Memory boundary.
+4. Authorize the Agent System client.
+5. The SDK validates the callback state/issuer, exchanges the code and stores tokens/client information in Windows Credential Manager.
+6. The probe initializes MCP and displays the actual discovered tool names and input schema fields. It does not create, update or delete memory.
+
+If port 8765 is occupied, set `MEMORYLAKE_OAUTH_CALLBACK_PORT` to another free localhost port and retry. Keep the chosen port stable between runs. The credential namespace includes the redirect URI, so changing the port creates a separate OAuth client registration rather than reusing a mismatched callback.
+
+The VS Code authorization is not automatically shared with the Python process. The Agent System performs its own OAuth authorization once and then reuses its securely stored credentials.
+
+## 5. Adapter API and workflow
+
+The public adapter API remains synchronous to avoid changing LangGraph nodes:
 
 ```python
-from adapters.memorylake_adapter import (
-    MemoryLakeAdapter,
-    MemoryType,
-    MemoryStatus,
-    create_memorylake_adapter,
-)
-
-adapter = create_memorylake_adapter(mock=True, project_id="proj-demo")
-
-# Propose only — never auto-approved
-mem = adapter.propose_memory(
-    content="Use append-only SQLite Event Ledger for operational evidence.",
-    memory_type=MemoryType.FACT,
-    project_id="proj-demo",
-    task_id="task-42",
-    source_ref="spec:v0.5#observability",
-    evidence_ref=["event:run-1"],
-    created_by="agent:planner",
-    confidence=0.9,
-)
-assert mem.status == MemoryStatus.PROPOSED
-
-hits = adapter.search("Event Ledger", project_id="proj-demo")
-report = adapter.detect_conflicts(query="ledger", project_id="proj-demo")
+adapter.discover_tools()
+adapter.search(query, project_id=project_id)
+adapter.detect_conflicts(query=query, project_id=project_id)
+adapter.propose_memory(content, project_id=project_id, ...)
 ```
 
-### Spec contract mapping
+The internal implementation uses MCP SDK v2 `Client`, `streamable_http_client`, `OAuthClientProvider` and `httpx2.AsyncClient`.
 
-| Spec field | Adapter handling |
-|------------|------------------|
-| `memory_id` | Client UUID; also sent in metadata |
-| `memory_type` | `background\|fact\|event\|dialogue\|reflection\|skill` |
-| `scope.project_id` | **Required** on write; passed to tools when supported |
-| `status` | Defaults to `proposed`; agents cannot self-set `approved`/`verified` |
-| `source_ref` / `evidence_ref` | Stored in metadata blob |
-| `version` / `supersedes` / `conflicts_with` | Client-side; re-propose with supersedes after review |
-| Promotion | Explicit `promote()` only for `user*` / `owner*` / `orchestrator*` actors; **live promote tool not documented** → `NotImplementedError` with guidance |
+- Retrieval remains before Planner.
+- Memory proposals remain after Deliver.
+- Agent writes default to `proposed`; agents cannot self-promote to `approved` or `verified`.
+- `discover_tools()` reports only names returned by the server. It does not substitute documented names after a discovery failure.
+- `health()['live_ready']` becomes true only after a successful live MCP operation, not merely because `MEMORYLAKE_MOCK=0`.
+- A live memory write is refused if the discovered `add_memory` schema cannot carry project scope through `project_id` or `metadata`.
+- Exact search/write schemas are discovered at runtime. If required fields are not mapped, the adapter fails closed and reports the missing field names rather than guessing.
 
-### Conflict & promotion policy (Spec §8)
+## 6. Verification stages
 
-- `detect_conflicts` surfaces conflicts; adapter never overwrites.
-- Proposed memories stay proposed until owner/orchestrator promotion.
-- Live MCP public tools do **not** document an update/promote tool → promotion in live mode is currently **BLOCKED** at the adapter (re-propose + supersedes, or use REST API after discovery).
+Start with read-only discovery:
 
-## 5. Tests
-
-```bash
-# Mock / unit (no credentials)
-MEMORYLAKE_MOCK=1 python src/tests/test_memorylake_adapter.py
+```powershell
+python .\scripts\memorylake_mcp_probe.py
 ```
 
-Expected: all unit tests pass; last line prints  
-`LIVE test: BLOCKED (no MEMORYLAKE_MCP_TOKEN)`.
+Then run local tests:
 
-### LIVE checklist (when token available)
+```powershell
+python -m compileall -q .\src .\run_agent.py .\scripts
+python -m pytest .\src\tests -q -rs
+```
 
-1. Set `MEMORYLAKE_MCP_TOKEN` + `MEMORYLAKE_PROJECT_ID`, `MEMORYLAKE_MOCK=0`.
-2. Run `adapter.discover_tools()` and log the returned names/schemas.
-3. Call `propose_memory` → `search` → `detect_conflicts` on a throwaway project.
-4. Confirm project isolation (token A cannot read project B).
-5. Record any schema drift vs this adapter and update `_to_add_payload` / parsers.
+Only after successful discovery should a separate QA task perform a retrieval. A proposal/write test must use a dedicated QA project or clearly isolated QA memory boundary; do not test writes against production memory.
 
-Until step 1–3 succeed, treat LIVE as **BLOCKED**. Do not mark Task 05 complete for live connectivity.
+Classify outcomes accurately:
+- `PASS`: live MCP initialize/discovery or operation succeeded with captured output.
+- `BLOCKED`: OAuth consent, credentials, endpoint access or required tool/schema is unavailable.
+- `FAIL`: an executed operation returned an error or violated the contract.
+- `NOT TESTED`: operation was not attempted.
 
-## 6. What this adapter does *not* do
+Mock tests do not prove Live connectivity.
 
-- Does not replace LangGraph checkpointer.
-- Does not replace SQLite Event Ledger (operational evidence stays in ledger).
-- Does not build a Memory Gateway (token granularity not yet proven insufficient).
-- Does not implement self-hosted MemoryLake server.
-- Does not invent MCP tools beyond documented + discovered names.
+## 7. Known boundaries
 
-## 7. Residual risks / open items
-
-| Item | Status |
-|------|--------|
-| Exact `add_memory` / `search_memory` argument schema | Must re-discover on first live session |
-| Live status update / promote tool | Not documented → NotImplementedError |
-| Resource URI scheme stability | Opaque; treat as string |
-| Multi-tenant isolation proof | Requires two project tokens in LIVE test |
-| Rate limits / quotas | Unknown; handle RuntimeError from transport |
-
----
-
-**Handoff status**
-
-- Adapter: `src/adapters/memorylake_adapter.py`
-- Env: documented above + `.env.example` keys
-- Project/token guide: this file §2
-- Unit/mock tests: pass without credentials
-- LIVE test: **BLOCKED** until `MEMORYLAKE_MCP_TOKEN` is supplied
+- This adapter does not replace LangGraph Checkpointer or SQLite Event Ledger.
+- This adapter does not automatically map a MemoryLake Workspace ID to Agent `project_id`.
+- Live retrieval must preserve explicit project provenance; unscoped results must not enter Planner context.
+- Live promotion remains unavailable unless the server exposes a documented update/promote operation.
+- The adapter does not use the Personal REST API Key for MCP OAuth.

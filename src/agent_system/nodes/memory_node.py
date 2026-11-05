@@ -23,6 +23,10 @@ def memory_retrieval_node(state: Dict[str, Any]) -> Dict[str, Any]:
             for hit in adapter.search(state.get("user_request", ""), project_id=project_id,
                                       status=status, top_k=4):
                 mem = hit.memory
+                # Enforce status locally as well as in the remote query. Some MCP
+                # servers may not expose a status filter in search_memory schema.
+                if mem.status != status:
+                    continue
                 if mem.scope.project_id != project_id:
                     continue
                 # The legacy adapter fills a missing response project_id from the

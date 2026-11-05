@@ -7,8 +7,8 @@ langgraph>=0.2.0
 langgraph-checkpoint-sqlite>=2.0.0
 aiosqlite>=0.20.0
 pytest>=8.0.0
+mcp>=2.3.0,<3
+keyring>=25.0.0
 
-# Optional only when explicitly integrating another MCP client implementation:
-# mcp>=1.0.0
 # Laya is optional for shadow inference and may require a compatible CPU torch build:
 # pip install laya

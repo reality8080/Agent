@@ -488,11 +488,15 @@ def test_live_memory_without_explicit_project_provenance_is_discarded(monkeypatc
                              "metadata": {"scope": {"project_id": "project-a"}, "source_ref": "repo:docs/a.md"}})
     unscoped = SharedMemory("unscoped", MemoryType.FACT, "unscoped response", MemoryScope(project_id="project-a"),
                             MemoryStatus.VERIFIED, raw={"metadata": {"source_ref": "unknown"}})
+    proposed = SharedMemory("proposed", MemoryType.FACT, "unreviewed proposal", MemoryScope(project_id="project-a"),
+                             MemoryStatus.PROPOSED, raw={
+                                 "metadata": {"scope": {"project_id": "project-a"}, "status": "proposed"}})
     class LiveAdapter:
         mock = False
         def search(self, query, **kwargs):
             if kwargs.get("status") == MemoryStatus.VERIFIED:
-                return [MemorySearchHit(valid), MemorySearchHit(unscoped)]
+                # Simulate a remote search tool that ignores an unsupported status filter.
+                return [MemorySearchHit(valid), MemorySearchHit(unscoped), MemorySearchHit(proposed)]
             return []
         def detect_conflicts(self, **kwargs):
             return SimpleNamespace(conflicts=[], mock=False)
